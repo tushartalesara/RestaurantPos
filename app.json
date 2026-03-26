@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Restaurant Menu Onboarding",
+    "slug": "restaurant-menu-onboarding",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "package": "com.connectr.restaurantonboarding",
+      "adaptiveIcon": {
+        "backgroundColor": "#0d1b2a"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.connectr.restaurantonboarding"
+    }
+  }
+}

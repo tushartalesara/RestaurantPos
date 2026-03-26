@@ -1,0 +1,14 @@
+html,
+body,
+#root,
+#root > div {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100dvh;
+  background: #0f1728;
+}
+
+body {
+  overflow-y: auto;
+}
