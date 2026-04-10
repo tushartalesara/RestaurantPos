@@ -21,10 +21,8 @@ cp .env.example .env
 
 Set:
 
-- `EXPO_PUBLIC_SUPABASE_URL` from Supabase project settings
-- `EXPO_PUBLIC_SUPABASE_ANON_KEY` from Supabase project settings
-- `EXPO_PUBLIC_IBARA_BASE_URL` to your `ibara-admin-portal` base URL
-- Optional: `EXPO_PUBLIC_IBARA_AGENT_CREATE_PATH` to override only the voice-agent creation endpoint for this app (path like `/api/mobile/voice-agent` or full URL)
+- `SUPABASE_URL` from Supabase project settings
+- `SUPABASE_ANON_KEY` from Supabase project settings
 - `EXPO_PUBLIC_GEMINI_API_KEY` for AI image parsing
 - Optional: `EXPO_PUBLIC_GEMINI_MODEL` (default: `gemini-2.0-flash`)
 

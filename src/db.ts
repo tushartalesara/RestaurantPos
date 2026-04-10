@@ -78,6 +78,10 @@ function missingMenuOrderingMessage(): string {
   return "Supabase menu ordering fields are missing. Run supabase/007_menu_item_sort_order.sql in Supabase SQL Editor, then refresh the app."
 }
 
+function missingManualOrderStockMessage(): string {
+  return "Manual POS stock sync is missing. Run supabase/010_manual_order_stock_atomic.sql in Supabase SQL Editor, then refresh the app."
+}
+
 function normalizeOrderTrackingErrorMessage(message: string): string {
   const normalized = message.toLowerCase()
   if (normalized.includes("all 999 active order ids")) {
@@ -90,6 +94,11 @@ function normalizeOptionalString(value: unknown): string | null {
   if (typeof value !== "string") return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+function isMissingFunctionError(error: SupabaseQueryError | null | undefined, functionName: string): boolean {
+  const haystack = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`.toLowerCase()
+  return haystack.includes(functionName.toLowerCase())
 }
 
 function extractRecordingUrlFromWebhookPayload(payload: unknown): string | null {
@@ -363,6 +372,7 @@ function normalizeOrderStatus(value: unknown): "pending" | "closed" {
 function sanitizeOrderItems(items: RestaurantOrderRecord["items"]) {
   return (items || [])
     .map((item) => ({
+      menuItemId: normalizeOptionalString(item.menuItemId),
       name: String(item.name || "").trim(),
       quantity: Math.max(1, Number(item.quantity || 1)),
       unitPrice: Number(item.unitPrice || 0),
@@ -397,17 +407,34 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
   if (orderRows.length === 0) return []
 
   const orderIds = orderRows.map((order) => String(order.id))
-  const { data: items, error: itemError } = await supabase
+  let items: Record<string, unknown>[] | null = null
+  let itemError: SupabaseQueryError | null = null
+
+  const itemResultWithMenuId = await supabase
     .from("restaurant_order_items")
-    .select("id, order_id, name, quantity, unit_price, created_at, updated_at")
+    .select("id, order_id, menu_item_id, name, quantity, unit_price, created_at, updated_at")
     .in("order_id", orderIds)
     .order("created_at", { ascending: true })
+
+  if (itemResultWithMenuId.error && isMissingColumnError(itemResultWithMenuId.error, "restaurant_order_items", "menu_item_id")) {
+    const fallbackItemResult = await supabase
+      .from("restaurant_order_items")
+      .select("id, order_id, name, quantity, unit_price, created_at, updated_at")
+      .in("order_id", orderIds)
+      .order("created_at", { ascending: true })
+
+    items = (fallbackItemResult.data as Record<string, unknown>[] | null) || null
+    itemError = fallbackItemResult.error
+  } else {
+    items = (itemResultWithMenuId.data as Record<string, unknown>[] | null) || null
+    itemError = itemResultWithMenuId.error
+  }
 
   if (itemError) {
     if (isMissingTableError(itemError, "restaurant_order_items")) {
       throw new Error(missingTableMessage("restaurant_order_items"))
     }
-    throw new Error(itemError.message)
+    throw new Error(itemError.message || "Failed to load restaurant order items.")
   }
 
   const callReviewsByOrderId = new Map<string, OrderCallReviewRecord>()
@@ -445,6 +472,7 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
     existing.push({
       id: String(item.id),
       order_id: orderId,
+      menuItemId: normalizeOptionalString(item.menu_item_id),
       name: String(item.name || ""),
       quantity: Number(item.quantity || 1),
       unitPrice: Number(item.unit_price || 0),
@@ -487,6 +515,42 @@ export async function saveRestaurantOrder(input: {
 
   const sanitizedItems = sanitizeOrderItems(input.items)
   const totalPrice = sanitizedItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
+  const canUseAtomicStockSync = sanitizedItems.length > 0 && sanitizedItems.every((item) => Boolean(item.menuItemId))
+
+  if (canUseAtomicStockSync) {
+    const { data, error } = await supabase.rpc("save_manual_order_atomic", {
+      p_restaurant_id: input.restaurantId,
+      p_order_id: input.orderId || null,
+      p_customer_name: input.customerName,
+      p_customer_phone: input.customerPhone,
+      p_notes: input.notes || null,
+      p_status: input.status || "pending",
+      p_items: sanitizedItems.map((item) => ({
+        item_id: item.menuItemId,
+        name: item.name,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+      })),
+    })
+
+    if (error) {
+      if (
+        isMissingFunctionError(error, "save_manual_order_atomic") ||
+        isMissingColumnError(error, "restaurant_order_items", "menu_item_id")
+      ) {
+        throw new Error(missingManualOrderStockMessage())
+      }
+      throw new Error(normalizeOrderTrackingErrorMessage(error.message || "Failed to save order with stock sync"))
+    }
+
+    const resolvedRow = Array.isArray(data) ? data[0] : data
+    const resolvedOrderId = normalizeOptionalString(resolvedRow?.order_id) || input.orderId || null
+    if (!resolvedOrderId) {
+      throw new Error("Failed to save the order with stock sync.")
+    }
+
+    return resolvedOrderId
+  }
 
   if (input.orderId) {
     const { error: updateError } = await supabase
@@ -521,20 +585,36 @@ export async function saveRestaurantOrder(input: {
     }
 
     if (sanitizedItems.length > 0) {
-      const payload = sanitizedItems.map((item) => ({
+      const payloadWithMenuItemId = sanitizedItems.map((item) => ({
         order_id: input.orderId,
+        menu_item_id: item.menuItemId || null,
         name: item.name,
         quantity: item.quantity,
         unit_price: item.unitPrice,
         updated_at: nowIso(),
       }))
 
-      const { error: insertItemsError } = await supabase.from("restaurant_order_items").insert(payload)
+      let insertItemsError: SupabaseQueryError | null = null
+      const insertItemsResult = await supabase.from("restaurant_order_items").insert(payloadWithMenuItemId)
+      insertItemsError = insertItemsResult.error
+
+      if (insertItemsError && isMissingColumnError(insertItemsError, "restaurant_order_items", "menu_item_id")) {
+        const fallbackPayload = sanitizedItems.map((item) => ({
+          order_id: input.orderId,
+          name: item.name,
+          quantity: item.quantity,
+          unit_price: item.unitPrice,
+          updated_at: nowIso(),
+        }))
+        const fallbackInsertResult = await supabase.from("restaurant_order_items").insert(fallbackPayload)
+        insertItemsError = fallbackInsertResult.error
+      }
+
       if (insertItemsError) {
         if (isMissingTableError(insertItemsError, "restaurant_order_items")) {
           throw new Error(missingTableMessage("restaurant_order_items"))
         }
-        throw new Error(normalizeOrderTrackingErrorMessage(insertItemsError.message))
+        throw new Error(normalizeOrderTrackingErrorMessage(insertItemsError.message || "Failed to save order items."))
       }
     }
 
@@ -567,19 +647,35 @@ export async function saveRestaurantOrder(input: {
 
   const orderId = requireData(insertedOrder, "Failed to create order").id as string
   if (sanitizedItems.length > 0) {
-    const payload = sanitizedItems.map((item) => ({
+    const payloadWithMenuItemId = sanitizedItems.map((item) => ({
       order_id: orderId,
+      menu_item_id: item.menuItemId || null,
       name: item.name,
       quantity: item.quantity,
       unit_price: item.unitPrice,
       updated_at: nowIso(),
     }))
-    const { error: insertItemsError } = await supabase.from("restaurant_order_items").insert(payload)
+    let insertItemsError: SupabaseQueryError | null = null
+    const insertItemsResult = await supabase.from("restaurant_order_items").insert(payloadWithMenuItemId)
+    insertItemsError = insertItemsResult.error
+
+    if (insertItemsError && isMissingColumnError(insertItemsError, "restaurant_order_items", "menu_item_id")) {
+      const fallbackPayload = sanitizedItems.map((item) => ({
+        order_id: orderId,
+        name: item.name,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+        updated_at: nowIso(),
+      }))
+      const fallbackInsertResult = await supabase.from("restaurant_order_items").insert(fallbackPayload)
+      insertItemsError = fallbackInsertResult.error
+    }
+
     if (insertItemsError) {
       if (isMissingTableError(insertItemsError, "restaurant_order_items")) {
         throw new Error(missingTableMessage("restaurant_order_items"))
       }
-      throw new Error(normalizeOrderTrackingErrorMessage(insertItemsError.message))
+      throw new Error(normalizeOrderTrackingErrorMessage(insertItemsError.message || "Failed to save order items."))
     }
   }
 

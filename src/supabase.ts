@@ -2,12 +2,12 @@ import "react-native-url-polyfill/auto"
 import AsyncStorage from "@react-native-async-storage/async-storage"
 import { createClient } from "@supabase/supabase-js"
 
-const supabaseUrl = String(process.env.EXPO_PUBLIC_SUPABASE_URL || "").trim()
-const supabaseAnonKey = String(process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "").trim()
+const supabaseUrl = String(process.env.SUPABASE_URL || "").trim()
+const supabaseAnonKey = String(process.env.SUPABASE_ANON_KEY || "").trim()
 
 export function assertSupabaseConfigured() {
   if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Supabase config missing. Set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY.")
+    throw new Error("Supabase config missing. Set SUPABASE_URL and SUPABASE_ANON_KEY.")
   }
 }
 

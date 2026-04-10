@@ -1,82 +1,53 @@
-function normalizeBaseUrl(url: string): string {
-  return url.trim().replace(/\/+$/, "")
+import { assertSupabaseConfigured, supabase } from "./supabase"
+
+export const ELEVENLABS_API_ORIGIN = "https://api.elevenlabs.io"
+
+type CreateRestaurantVoiceAgentInput = {
+  restaurantId: string
+  apiKey: string
 }
 
-const DEFAULT_AGENT_CREATE_PATH = "/api/customer/agent"
-const CONFIGURED_AGENT_CREATE_PATH = String(process.env.EXPO_PUBLIC_IBARA_AGENT_CREATE_PATH || "").trim()
-
-async function parseJson(response: Response) {
-  return response.json().catch(() => ({} as Record<string, any>))
-}
-
-function resolveAgentCreateUrl(baseUrl: string): string {
-  if (!CONFIGURED_AGENT_CREATE_PATH) {
-    return `${normalizeBaseUrl(baseUrl)}${DEFAULT_AGENT_CREATE_PATH}`
+type CreateRestaurantVoiceAgentResponse = {
+  agent_id?: string
+  agent?: {
+    agent_id?: string
   }
-  if (/^https?:\/\//i.test(CONFIGURED_AGENT_CREATE_PATH)) {
-    return CONFIGURED_AGENT_CREATE_PATH
-  }
-  const path = CONFIGURED_AGENT_CREATE_PATH.startsWith("/")
-    ? CONFIGURED_AGENT_CREATE_PATH
-    : `/${CONFIGURED_AGENT_CREATE_PATH}`
-  return `${normalizeBaseUrl(baseUrl)}${path}`
+  error?: string
 }
 
-export async function loginToIbaraWorkspace(input: { baseUrl: string; email: string; password: string }) {
-  const baseUrl = normalizeBaseUrl(input.baseUrl)
-  const response = await fetch(`${baseUrl}/api/mobile/auth/token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+export async function createRestaurantVoiceAgent(input: CreateRestaurantVoiceAgentInput) {
+  assertSupabaseConfigured()
+
+  const restaurantId = normalizeString(input.restaurantId)
+  const apiKey = normalizeString(input.apiKey)
+
+  if (!restaurantId) {
+    throw new Error("restaurant_id is required")
+  }
+  if (!apiKey) {
+    throw new Error("ElevenLabs API key is required")
+  }
+
+  const { data, error } = await supabase.functions.invoke<CreateRestaurantVoiceAgentResponse>("create-elevenlabs-agent", {
+    body: {
+      restaurant_id: restaurantId,
+      api_key: apiKey,
     },
-    body: JSON.stringify({
-      email: input.email.trim(),
-      password: input.password,
-    }),
   })
 
-  const payload = await parseJson(response)
-  if (!response.ok || !payload?.token) {
-    throw new Error(payload?.error || "Failed to authenticate with ibara workspace")
+  if (error) {
+    throw new Error(error.message || "Failed to create voice agent in ElevenLabs")
   }
 
-  return {
-    baseUrl,
-    token: String(payload.token),
-  }
-}
+  const payload = data || {}
+  const agentId = normalizeString(payload.agent_id) || normalizeString(payload.agent?.agent_id)
 
-export async function createRestaurantVoiceAgent(input: {
-  baseUrl: string
-  token: string
-  restaurantName: string
-  phone?: string | null
-  address?: string | null
-}) {
-  const response = await fetch(resolveAgentCreateUrl(input.baseUrl), {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${input.token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      source: "mobile_onboarding",
-      industry: "restaurant",
-      useCase: "general_inquiry",
-      agentName: input.restaurantName,
-      phone: input.phone || null,
-      address: input.address || null,
-    }),
-  })
-
-  const payload = await parseJson(response)
-  if (!response.ok) {
-    throw new Error(payload?.error || "Failed to create voice agent in workspace")
-  }
-
-  const agentId = String(payload?.agent?.agent_id || payload?.agent_id || "").trim()
   if (!agentId) {
-    throw new Error("Workspace did not return an agent_id")
+    throw new Error(payload.error || "ElevenLabs did not return an agent_id")
   }
 
   return {

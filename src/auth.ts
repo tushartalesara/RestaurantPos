@@ -1,11 +1,47 @@
 import type { AppSession, SessionUser } from "./types"
 import { assertSupabaseConfigured, supabase } from "./supabase"
 
+const APP_SCHEME = String(process.env.EXPO_PUBLIC_APP_SCHEME || "restaurantops").trim() || "restaurantops"
+export const EMAIL_CONFIRM_REDIRECT_URL =
+  String(process.env.EXPO_PUBLIC_EMAIL_CONFIRM_REDIRECT_URL || `${APP_SCHEME}://auth/verified`).trim() ||
+  `${APP_SCHEME}://auth/verified`
+
 function mapSessionUser(user: { id: string; email?: string | null }): SessionUser {
   return {
     id: user.id,
     email: String(user.email || ""),
   }
+}
+
+function parseAuthRedirectParams(rawUrl: string) {
+  const params = new URLSearchParams()
+
+  const queryIndex = rawUrl.indexOf("?")
+  if (queryIndex >= 0) {
+    const queryEndIndex = rawUrl.indexOf("#", queryIndex)
+    const queryString = rawUrl.slice(queryIndex + 1, queryEndIndex >= 0 ? queryEndIndex : undefined)
+    const queryParams = new URLSearchParams(queryString)
+    queryParams.forEach((value, key) => params.set(key, value))
+  }
+
+  const hashIndex = rawUrl.indexOf("#")
+  if (hashIndex >= 0) {
+    const hashString = rawUrl.slice(hashIndex + 1)
+    const hashParams = new URLSearchParams(hashString)
+    hashParams.forEach((value, key) => params.set(key, value))
+  }
+
+  return params
+}
+
+export type AuthRedirectResult = {
+  type: string
+  email: string
+}
+
+function isInvalidRefreshTokenMessage(message: string) {
+  const lowerMessage = message.toLowerCase()
+  return lowerMessage.includes("invalid refresh token") || lowerMessage.includes("refresh token not found")
 }
 
 function normalizeAuthErrorMessage(error: { message?: string; status?: number } | null | undefined) {
@@ -34,6 +70,10 @@ function normalizeAuthErrorMessage(error: { message?: string; status?: number } 
 
   if (lowerMessage.includes("email not confirmed")) {
     return "Please open the confirmation email we sent earlier, then sign in."
+  }
+
+  if (isInvalidRefreshTokenMessage(message)) {
+    return "That verification link has already been used or is no longer valid. Please try signing in, or request a fresh link."
   }
 
   if (lowerMessage.includes("rate limit")) {
@@ -65,6 +105,9 @@ export async function registerWithEmail(email: string, password: string): Promis
   const { data, error } = await supabase.auth.signUp({
     email: normalizedEmail,
     password,
+    options: {
+      emailRedirectTo: EMAIL_CONFIRM_REDIRECT_URL,
+    },
   })
 
   if (error) {
@@ -127,6 +170,51 @@ export async function resetPasswordWithEmail(email: string): Promise<void> {
   }
 }
 
+export async function completeAuthRedirectFromUrl(rawUrl: string): Promise<AuthRedirectResult | null> {
+  assertSupabaseConfigured()
+
+  const normalizedUrl = rawUrl.trim()
+  if (!normalizedUrl) {
+    return null
+  }
+
+  const params = parseAuthRedirectParams(normalizedUrl)
+  const redirectError = String(params.get("error_description") || params.get("error") || "").trim()
+  if (redirectError) {
+    throw new Error(redirectError)
+  }
+
+  const type = String(params.get("type") || "").trim().toLowerCase()
+  const code = String(params.get("code") || "").trim()
+  const accessToken = String(params.get("access_token") || "").trim()
+  const refreshToken = String(params.get("refresh_token") || "").trim()
+
+  if (!code && !(accessToken && refreshToken)) {
+    return null
+  }
+
+  let email = ""
+
+  if (code) {
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code)
+    if (error) {
+      throw new Error(normalizeAuthErrorMessage(error))
+    }
+    email = String(data.session?.user?.email || "").trim()
+  } else {
+    const { data, error } = await supabase.auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    })
+    if (error) {
+      throw new Error(normalizeAuthErrorMessage(error))
+    }
+    email = String(data.session?.user?.email || "").trim()
+  }
+
+  return { type, email }
+}
+
 // Session is persisted by Supabase auth storage. Kept for API compatibility.
 export async function saveSession(_session: AppSession) {
   return
@@ -137,6 +225,10 @@ export async function getSession(): Promise<AppSession | null> {
 
   const { data, error } = await supabase.auth.getSession()
   if (error) {
+    if (isInvalidRefreshTokenMessage(String(error.message || ""))) {
+      await supabase.auth.signOut({ scope: "local" })
+      return null
+    }
     throw new Error(error.message)
   }
 
@@ -151,8 +243,11 @@ export async function getSession(): Promise<AppSession | null> {
 
 export async function clearSession() {
   assertSupabaseConfigured()
-  const { error } = await supabase.auth.signOut()
+  const { error } = await supabase.auth.signOut({ scope: "local" })
   if (error) {
+    if (isInvalidRefreshTokenMessage(String(error.message || ""))) {
+      return
+    }
     throw new Error(error.message)
   }
 }

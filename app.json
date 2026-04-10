@@ -2,6 +2,7 @@
   "expo": {
     "name": "Restaurant Menu Onboarding",
     "slug": "restaurant-menu-onboarding",
+    "scheme": "restaurantops",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
@@ -12,10 +13,22 @@
       "package": "com.connectr.restaurantonboarding",
       "adaptiveIcon": {
         "backgroundColor": "#0d1b2a"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "ios": {
       "bundleIdentifier": "com.connectr.restaurantonboarding"
+    },
+    "plugins": [
+      "expo-audio"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "11f691c6-2bff-4ed9-b792-edc7beb3959c"
+      }
     }
   }
 }
