@@ -1258,13 +1258,16 @@ function formatShortOrderCode(value: number | null | undefined): string | null {
   return String(Math.round(value)).padStart(3, "0")
 }
 
+const CURRENCY_SYMBOL = "\u00A3"
+const HTML_CURRENCY_ENTITY = "&pound;"
+
 function formatCurrencyDisplay(value: number | null | undefined): string {
   const normalizedValue = Number(value || 0)
   if (!Number.isFinite(normalizedValue)) {
-    return "$0.00"
+    return `${CURRENCY_SYMBOL}0.00`
   }
 
-  return `$${normalizedValue.toFixed(2)}`
+  return `${CURRENCY_SYMBOL}${normalizedValue.toFixed(2)}`
 }
 
 function formatAudioTime(value: number | null | undefined): string {
@@ -1404,7 +1407,7 @@ function renderReceiptContent(order: ReceiptOrder | null, restaurantName: string
   }
 
   const items = order?.items || order?.order_items || []
-  const total = `$${getReceiptNumericString(order?.total_amount || order?.total || 0)}`
+  const total = formatCurrencyDisplay(Number(getReceiptNumericString(order?.total_amount || order?.total || 0)))
   const customerName = String(order?.customer_name || order?.contact_name || "Guest")
   const customerPhone = String(order?.customer_phone || order?.contact_phone || "").trim()
   const notes = String(order?.notes || order?.special_instructions || "").trim()
@@ -1457,7 +1460,7 @@ function renderReceiptContent(order: ReceiptOrder | null, restaurantName: string
             <Text style={styles.thermalReceiptItemName}>{String(item.name || item.item_name || "").toUpperCase()}</Text>
             <Text style={styles.thermalReceiptItemQty}>{String(item.quantity || item.qty || 1)}</Text>
             <Text style={styles.thermalReceiptItemPrice}>
-              {`$${getReceiptNumericString(item.price || item.unit_price || 0)}`}
+              {formatCurrencyDisplay(Number(getReceiptNumericString(item.price || item.unit_price || 0)))}
             </Text>
           </View>
         ))
@@ -1524,7 +1527,7 @@ function getLegacyReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string)
       <tr>
         <td class="desc">${escapeReceiptHtml(String(item.name || item.item_name || "")).toUpperCase()}</td>
         <td class="qty">${escapeReceiptHtml(String(item.quantity || item.qty || 1))}</td>
-        <td class="price">&#8377;${getReceiptNumericString(item.price || item.unit_price || 0)}</td>
+        <td class="price">${HTML_CURRENCY_ENTITY}${getReceiptNumericString(item.price || item.unit_price || 0)}</td>
       </tr>
     `)
     .join("")
@@ -1580,7 +1583,7 @@ function getLegacyReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string)
   <!-- Total -->
   <div class="total-row">
     <span>TOTAL</span>
-    <span>&#8377;${total}</span>
+    <span>${HTML_CURRENCY_ENTITY}${total}</span>
   </div>
   <hr class="dashed">
 
@@ -1778,7 +1781,7 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
       <tr>
         <td class="desc">${escapeReceiptHtml(String(item.name || item.item_name || "")).toUpperCase()}</td>
         <td class="qty">${escapeReceiptHtml(String(item.quantity || item.qty || 1))}</td>
-        <td class="price">&#8377;${getReceiptNumericString(item.price || item.unit_price || 0)}</td>
+        <td class="price">${HTML_CURRENCY_ENTITY}${getReceiptNumericString(item.price || item.unit_price || 0)}</td>
       </tr>
     `)
     .join("")
@@ -1829,7 +1832,7 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
 
   <div class="total-row">
     <span>TOTAL</span>
-    <span>&#8377;${total}</span>
+    <span>${HTML_CURRENCY_ENTITY}${total}</span>
   </div>
   <div class="divider">--------------------------------</div>
 

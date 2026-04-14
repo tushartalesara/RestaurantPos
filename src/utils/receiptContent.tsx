@@ -1,7 +1,7 @@
 import React from "react"
 import { Platform, StyleSheet, Text, View } from "react-native"
 import type { ReceiptOrder } from "../types"
-import { formatReceiptDate, getOrderStatusLabel, getReceiptNumericString } from "./formatters"
+import { formatCurrencyDisplay, formatReceiptDate, getOrderStatusLabel, getReceiptNumericString } from "./formatters"
 
 type ReceiptContentProps = {
   order: ReceiptOrder | null
@@ -14,7 +14,7 @@ export function ReceiptContent({ order, restaurantName }: ReceiptContentProps) {
   }
 
   const items = order?.items || order?.order_items || []
-  const total = `$${getReceiptNumericString(order?.total_amount || order?.total || 0)}`
+  const total = formatCurrencyDisplay(Number(getReceiptNumericString(order?.total_amount || order?.total || 0)))
   const customerName = String(order?.customer_name || order?.contact_name || "Guest")
   const customerPhone = String(order?.customer_phone || order?.contact_phone || "").trim()
   const notes = String(order?.notes || order?.special_instructions || "").trim()
@@ -53,7 +53,9 @@ export function ReceiptContent({ order, restaurantName }: ReceiptContentProps) {
           <View key={`receipt-item-${index}-${item.name || item.item_name || "item"}`} style={styles.itemRow}>
             <Text style={styles.itemName}>{String(item.name || item.item_name || "").toUpperCase()}</Text>
             <Text style={styles.itemQty}>{String(item.quantity || item.qty || 1)}</Text>
-            <Text style={styles.itemPrice}>{`$${getReceiptNumericString(item.price || item.unit_price || 0)}`}</Text>
+            <Text style={styles.itemPrice}>
+              {formatCurrencyDisplay(Number(getReceiptNumericString(item.price || item.unit_price || 0)))}
+            </Text>
           </View>
         ))
       ) : (

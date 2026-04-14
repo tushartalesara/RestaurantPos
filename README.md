@@ -9,17 +9,15 @@ This is a standalone Expo React Native app (SDK 54) for restaurant onboarding:
 - Save all menu data in Supabase tables
 - View/edit menu (including price updates)
 - View/edit restaurant orders
-- Link/create voice agent in Ibara workspace (only workspace dependency)
+- Create/link voice agents directly in ElevenLabs
 
 ## Setup
 
 ```bash
-cd mobile-onboarding-rn
-npm install
-cp .env.example .env
+pnpm install
 ```
 
-Set:
+Create a `.env` file in the project root and set:
 
 - `SUPABASE_URL` from Supabase project settings
 - `SUPABASE_ANON_KEY` from Supabase project settings
@@ -30,7 +28,7 @@ Set:
 
 Use this only with admin/server credentials to reset a password without sending email.
 
-1. Copy `.env.admin.example` to `.env.admin` and set:
+1. Create `.env.admin` and set:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
 2. Run one of:
@@ -47,26 +45,45 @@ Run SQL schema in Supabase SQL editor:
 
 - `supabase/001_init_restaurant_onboarding.sql`
 - `supabase/002_post_call_webhook_ingestion.sql`
+- `supabase/003_menu_stock_and_tool_support.sql`
+- `supabase/004_place_voice_order_atomic.sql`
+- `supabase/010_manual_order_stock_atomic.sql`
+- `supabase/012_voice_agent_link_webhooks.sql`
 
 Run app:
 
 ```bash
-npm run start
+pnpm start
 ```
 
 ## Voice Agent Connection
 
-In the app, go to **Voice Agent Connection** and either:
+In the app, go to **Voice AI Configuration** and either:
 
-1. Create an agent from Ibara credentials (email/password)
-2. Link an existing workspace `agent_id`
+1. Create a new ElevenLabs agent using the restaurant's ElevenLabs API key
+2. Link an existing ElevenLabs `agent_id`
 
 The app stores the linked `agent_id` per restaurant in Supabase table `voice_agent_links`.
 
-For mobile-specific ElevenLabs credentials, configure these in the `ibara-admin-portal` backend `.env`:
+The create flow is direct to ElevenLabs:
 
-- `ELEVENLABS_API_KEY_AGENT_CREATION` (default key for non-mobile flows)
-- `ELEVENLABS_API_KEY_AGENT_CREATION_MOBILE_ONBOARDING` (used when source is `mobile_onboarding`)
+- the mobile app collects the restaurant's ElevenLabs API key
+- the app calls the Supabase edge function `create-elevenlabs-agent`
+- that function creates the agent in ElevenLabs, provisions the menu/order tools, configures the post-call webhook, and stores the final link in Supabase
+
+Before using the create flow, deploy and configure:
+
+- `supabase/functions/create-elevenlabs-agent/index.ts`
+- `supabase/functions/elevenlabs-post-call/index.ts`
+- all tool functions listed below
+
+Set these Supabase function secrets/env vars:
+
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `ELEVENLABS_TOOL_SECRET`
+- Optional: `MOBILE_ONBOARDING_SUPABASE_FUNCTIONS_BASE_URL` or `SUPABASE_FUNCTIONS_BASE_URL`
 
 ## Menu Scan Note
 
@@ -96,6 +113,10 @@ Reference schema file:
 
 - `supabase/001_init_restaurant_onboarding.sql`
 - `supabase/002_post_call_webhook_ingestion.sql`
+- `supabase/003_menu_stock_and_tool_support.sql`
+- `supabase/004_place_voice_order_atomic.sql`
+- `supabase/010_manual_order_stock_atomic.sql`
+- `supabase/012_voice_agent_link_webhooks.sql`
 
 ## Post-Call Webhook
 
@@ -115,6 +136,7 @@ Webhook output flow:
 
 These Supabase edge functions are provided for live menu/order calls:
 
+- `supabase/functions/create-elevenlabs-agent/index.ts`
 - `supabase/functions/get-menu-items/index.ts`
 - `supabase/functions/get-item-customizations/index.ts`
 - `supabase/functions/check-item-stock/index.ts`
@@ -123,10 +145,12 @@ These Supabase edge functions are provided for live menu/order calls:
 Deploy:
 
 ```bash
+supabase functions deploy create-elevenlabs-agent
 supabase functions deploy get-menu-items
 supabase functions deploy get-item-customizations
 supabase functions deploy check-item-stock
 supabase functions deploy place-order-atomic
+supabase functions deploy elevenlabs-post-call
 ```
 
 Set a shared tool secret (used as `x-tool-secret` header from ElevenLabs tool config):
@@ -139,3 +163,5 @@ Stock support migration required:
 
 - `supabase/003_menu_stock_and_tool_support.sql`
 - `supabase/004_place_voice_order_atomic.sql`
+- `supabase/010_manual_order_stock_atomic.sql`
+- `supabase/012_voice_agent_link_webhooks.sql`

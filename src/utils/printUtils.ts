@@ -3,6 +3,8 @@ import * as Print from "expo-print"
 import type { ReceiptOrder } from "../types"
 import { escapeReceiptHtml, formatReceiptDate, getReceiptNumericString } from "./formatters"
 
+const HTML_CURRENCY_ENTITY = "&pound;"
+
 function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): string {
   const itemRows = (order.items || order.order_items || [])
     .map((item) => {
@@ -13,7 +15,7 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
         <tr>
           <td class="desc">${name}</td>
           <td class="qty">${quantity}</td>
-          <td class="price">&#8377;${price}</td>
+          <td class="price">${HTML_CURRENCY_ENTITY}${price}</td>
         </tr>
       `
     })
@@ -67,7 +69,7 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
 
     <div class="total-row">
       <span>TOTAL</span>
-      <span>&#8377;${total}</span>
+      <span>${HTML_CURRENCY_ENTITY}${total}</span>
     </div>
     <div class="divider">--------------------------------</div>
 

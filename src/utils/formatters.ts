@@ -1,12 +1,14 @@
 import { ReceiptOrder } from "../types"
 
+const CURRENCY_SYMBOL = "\u00A3"
+
 export function formatShortOrderCode(value: number | null | undefined): string | null {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return null
   return String(Math.max(0, Math.floor(Number(value)))).padStart(3, "0")
 }
 
 export function formatCurrencyDisplay(value: number | null | undefined): string {
-  return `$${Number(value || 0).toFixed(2)}`
+  return `${CURRENCY_SYMBOL}${Number(value || 0).toFixed(2)}`
 }
 
 export function formatAudioTime(value: number | null | undefined): string {
