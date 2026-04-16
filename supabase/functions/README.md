@@ -78,7 +78,23 @@ Request body:
 }
 ```
 
-## 4) place-order-atomic
+## 4) lookup-uk-postcode-addresses
+
+Path:
+
+`/lookup-uk-postcode-addresses`
+
+Request body:
+
+```json
+{
+  "agent_id": "AGENT_ID_FROM_ELEVENLABS",
+  "restaurant_id": "OPTIONAL_RESTAURANT_UUID",
+  "postcode": "SW1A 1AA"
+}
+```
+
+## 5) place-order-atomic
 
 Path:
 
@@ -91,6 +107,11 @@ Request body:
   "agent_id": "AGENT_ID_FROM_ELEVENLABS",
   "restaurant_id": "OPTIONAL_RESTAURANT_UUID",
   "customer_name": "John",
+  "customer_phone": "07123456789",
+  "fulfillment_type": "delivery",
+  "delivery_postcode": "SW1A 1AA",
+  "delivery_address": "10 Downing Street, Westminster, London, SW1A 2AA",
+  "payment_collection": "cod",
   "status": "pending",
   "notes": "no onions",
   "items": [
@@ -100,17 +121,44 @@ Request body:
 }
 ```
 
+## 6) update-order-payment-status
+
+Path:
+
+`/update-order-payment-status`
+
+Request body:
+
+```json
+{
+  "restaurant_id": "RESTAURANT_UUID",
+  "order_id": "ORDER_UUID",
+  "pin": "1234",
+  "payment_status": "paid",
+  "payment_method": "card",
+  "card_transaction_id": "TXN-12345"
+}
+```
+
 ## Setup Checklist
 
 1. Run SQL migrations:
    - `supabase/001_init_restaurant_onboarding.sql`
    - `supabase/002_post_call_webhook_ingestion.sql`
    - `supabase/003_menu_stock_and_tool_support.sql`
-   - `supabase/004_place_voice_order_atomic.sql`
-2. Deploy all 4 functions:
+   - `supabase/005_order_contact_and_short_code.sql`
+   - `supabase/006_active_pending_order_ids.sql`
+   - `supabase/010_manual_order_stock_atomic.sql`
+   - `supabase/013_order_fulfillment_and_delivery_fields.sql`
+   - `supabase/014_order_payment_settlement.sql`
+2. Deploy all 6 tool functions:
    - `supabase functions deploy get-menu-items`
    - `supabase functions deploy get-item-customizations`
    - `supabase functions deploy check-item-stock`
+   - `supabase functions deploy lookup-uk-postcode-addresses`
    - `supabase functions deploy place-order-atomic`
-3. Set secret:
+   - `supabase functions deploy update-order-payment-status`
+3. Set secrets:
    - `supabase secrets set ELEVENLABS_TOOL_SECRET=...`
+   - `supabase secrets set GETADDRESS_API_KEY=...`
+   - `supabase secrets set ORDER_PAYMENT_PIN=1234`

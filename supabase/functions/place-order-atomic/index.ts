@@ -28,6 +28,32 @@ function toStatus(value: unknown): "pending" | "closed" {
   return normalizeString(value).toLowerCase() === "closed" ? "closed" : "pending"
 }
 
+function normalizeFulfillmentType(value: unknown): "pickup" | "delivery" {
+  return normalizeString(value).toLowerCase() === "delivery" ? "delivery" : "pickup"
+}
+
+function normalizeUkPostcode(value: unknown): string {
+  const compact = normalizeString(value).toUpperCase().replace(/\s+/g, "")
+  if (!compact) {
+    return ""
+  }
+  if (compact.length <= 3) {
+    return compact
+  }
+  return `${compact.slice(0, -3)} ${compact.slice(-3)}`
+}
+
+function normalizePaymentCollection(
+  value: unknown,
+  fulfillmentType: "pickup" | "delivery",
+): "unpaid" | "cod" {
+  const normalized = normalizeString(value).toLowerCase()
+  if (normalized === "cod" || normalized === "unpaid") {
+    return normalized
+  }
+  return fulfillmentType === "delivery" ? "cod" : "unpaid"
+}
+
 function toInteger(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return Math.round(value)
   if (typeof value === "string") {
@@ -173,6 +199,10 @@ serve(async (request) => {
   const conversationId = normalizeString(bodyObj.conversation_id)
   const customerName = normalizeString(bodyObj.customer_name)
   const customerPhone = normalizeString(bodyObj.customer_phone)
+  const fulfillmentType = normalizeFulfillmentType(bodyObj.fulfillment_type)
+  const deliveryPostcode = normalizeUkPostcode(bodyObj.delivery_postcode)
+  const deliveryAddress = normalizeString(bodyObj.delivery_address)
+  const paymentCollection = normalizePaymentCollection(bodyObj.payment_collection, fulfillmentType)
   const notes = normalizeString(bodyObj.notes)
   const status = toStatus(bodyObj.status)
   const items = parseItems(bodyObj.items)
@@ -185,6 +215,12 @@ serve(async (request) => {
   }
   if (!customerPhone) {
     return jsonResponse(400, { error: "customer_phone is required." })
+  }
+  if (fulfillmentType === "delivery" && !deliveryPostcode) {
+    return jsonResponse(400, { error: "delivery_postcode is required when fulfillment_type is delivery." })
+  }
+  if (fulfillmentType === "delivery" && !deliveryAddress) {
+    return jsonResponse(400, { error: "delivery_address is required when fulfillment_type is delivery." })
   }
   if (items.length === 0) {
     return jsonResponse(400, { error: "items must be a non-empty array with item_id and quantity." })
@@ -224,6 +260,10 @@ serve(async (request) => {
     p_notes: notes || null,
     p_status: status,
     p_items: items,
+    p_fulfillment_type: fulfillmentType,
+    p_delivery_postcode: fulfillmentType === "delivery" ? deliveryPostcode : null,
+    p_delivery_address: fulfillmentType === "delivery" ? deliveryAddress : null,
+    p_payment_collection: paymentCollection,
   })
 
   if (rpcResult.error) {
@@ -275,7 +315,21 @@ serve(async (request) => {
         reason: "order_tracking_schema_missing",
         error: message || "Unknown database error",
         remediation:
-          "Run supabase/005_order_contact_and_short_code.sql, supabase/006_active_pending_order_ids.sql, and if needed supabase/008_repair_place_voice_order_atomic.sql in Supabase SQL Editor, then retry.",
+          "Run supabase/005_order_contact_and_short_code.sql, supabase/006_active_pending_order_ids.sql, and supabase/013_order_fulfillment_and_delivery_fields.sql in Supabase SQL Editor, then retry.",
+      })
+    }
+    if (
+      lower.includes("fulfillment_type") ||
+      lower.includes("delivery_postcode") ||
+      lower.includes("delivery_address") ||
+      lower.includes("payment_collection")
+    ) {
+      return jsonResponse(500, {
+        ok: false,
+        reason: "order_fulfillment_schema_missing",
+        error: message || "Unknown database error",
+        remediation:
+          "Run supabase/013_order_fulfillment_and_delivery_fields.sql in Supabase SQL Editor, then retry.",
       })
     }
     return jsonResponse(500, { error: message || "Failed to place order atomically." })
@@ -302,6 +356,10 @@ serve(async (request) => {
     order_id: orderId || null,
     short_order_code: shortOrderCode > 0 ? shortOrderCode : null,
     order_code: formatOrderCode(firstRow?.short_order_code),
+    fulfillment_type: fulfillmentType,
+    delivery_postcode: fulfillmentType === "delivery" ? deliveryPostcode : null,
+    delivery_address: fulfillmentType === "delivery" ? deliveryAddress : null,
+    payment_collection: paymentCollection,
     total_price: Number(firstRow?.total_price || 0),
     item_count: Number(firstRow?.item_count || items.length),
   })

@@ -66,11 +66,23 @@ export interface OrderCallReviewRecord {
   updated_at?: string
 }
 
+export type FulfillmentType = "pickup" | "delivery"
+export type PaymentCollection = "unpaid" | "cod"
+export type PaymentStatus = "unpaid" | "paid"
+export type PaymentMethod = "cash" | "card"
+
 export interface RestaurantOrderRecord {
   id?: string
   restaurant_id?: string
   customerName: string
   customerPhone?: string | null
+  fulfillmentType: FulfillmentType
+  deliveryPostcode?: string | null
+  deliveryAddress?: string | null
+  paymentCollection: PaymentCollection
+  paymentStatus: PaymentStatus
+  paymentMethod?: PaymentMethod | null
+  cardTransactionId?: string | null
   shortOrderCode?: number | null
   orderCodeDate?: string | null
   status: "pending" | "closed"
@@ -95,6 +107,13 @@ export type UiOrderDraft = {
   id?: string
   customerName: string
   customerPhone: string
+  fulfillmentType: FulfillmentType
+  deliveryPostcode: string
+  deliveryAddress: string
+  paymentCollection: PaymentCollection
+  paymentStatus: PaymentStatus
+  paymentMethod: PaymentMethod | ""
+  cardTransactionId: string
   shortOrderCode?: number | null
   orderCodeDate?: string | null
   createdAt?: string | null
@@ -104,7 +123,7 @@ export type UiOrderDraft = {
   callReview?: RestaurantOrderRecord["callReview"]
 }
 
-export type MainTab = "overview" | "menu" | "orders" | "voice"
+export type MainTab = "overview" | "menu" | "orders" | "voice" | "summary"
 export type AppMode = "admin" | "pos"
 export type AuthMode = "login" | "register" | "reset"
 export type ParseInsertMode = "replace" | "prepend" | "append"
@@ -131,10 +150,17 @@ export type ReceiptOrder = {
   short_code?: string | number | null
   status?: string | null
   created_at?: string | null
+  fulfillment_type?: FulfillmentType | string | null
+  payment_collection?: PaymentCollection | string | null
+  payment_status?: PaymentStatus | string | null
+  payment_method?: PaymentMethod | string | null
   customer_name?: string | null
   contact_name?: string | null
   customer_phone?: string | null
   contact_phone?: string | null
+  delivery_postcode?: string | null
+  delivery_address?: string | null
+  card_transaction_id?: string | null
   notes?: string | null
   special_instructions?: string | null
   total_amount?: number | string | null

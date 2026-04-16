@@ -79,13 +79,24 @@ function missingMenuOrderingMessage(): string {
 }
 
 function missingManualOrderStockMessage(): string {
-  return "Manual POS stock sync is missing. Run supabase/010_manual_order_stock_atomic.sql in Supabase SQL Editor, then refresh the app."
+  return "Manual POS stock sync is missing. Run supabase/010_manual_order_stock_atomic.sql and supabase/013_order_fulfillment_and_delivery_fields.sql in Supabase SQL Editor, then refresh the app."
+}
+
+function missingOrderFulfillmentMessage(): string {
+  return "Order fulfilment fields are missing. Run supabase/013_order_fulfillment_and_delivery_fields.sql in Supabase SQL Editor, then refresh the app."
+}
+
+function missingOrderPaymentMessage(): string {
+  return "Order payment fields are missing. Run supabase/014_order_payment_settlement.sql in Supabase SQL Editor, then refresh the app."
 }
 
 function normalizeOrderTrackingErrorMessage(message: string): string {
   const normalized = message.toLowerCase()
   if (normalized.includes("all 999 active order ids")) {
     return "All live 3-digit order IDs are currently in use. Close a completed order, then try again."
+  }
+  if (normalized.includes("short_order_code") && normalized.includes("already in use for an active order")) {
+    return `${message}. Run supabase/015_harden_active_short_order_codes.sql in Supabase SQL Editor, then retry.`
   }
   return message
 }
@@ -369,6 +380,33 @@ function normalizeOrderStatus(value: unknown): "pending" | "closed" {
   return value === "closed" ? "closed" : "pending"
 }
 
+function normalizeFulfillmentType(value: unknown): "pickup" | "delivery" {
+  return String(value || "").trim().toLowerCase() === "delivery" ? "delivery" : "pickup"
+}
+
+function normalizePaymentCollection(
+  value: unknown,
+  fulfillmentType: "pickup" | "delivery",
+): "unpaid" | "cod" {
+  const normalized = String(value || "").trim().toLowerCase()
+  if (normalized === "cod" || normalized === "unpaid") {
+    return normalized
+  }
+  return fulfillmentType === "delivery" ? "cod" : "unpaid"
+}
+
+function normalizePaymentStatus(value: unknown): "unpaid" | "paid" {
+  return String(value || "").trim().toLowerCase() === "paid" ? "paid" : "unpaid"
+}
+
+function normalizePaymentMethod(value: unknown): "cash" | "card" | null {
+  const normalized = String(value || "").trim().toLowerCase()
+  if (normalized === "cash" || normalized === "card") {
+    return normalized
+  }
+  return null
+}
+
 function sanitizeOrderItems(items: RestaurantOrderRecord["items"]) {
   return (items || [])
     .map((item) => ({
@@ -385,7 +423,9 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
 
   const { data: orders, error: orderError } = await supabase
     .from("restaurant_orders")
-    .select("id, restaurant_id, customer_name, customer_phone, short_order_code, order_code_date, status, notes, total_price, created_at, updated_at")
+    .select(
+      "id, restaurant_id, customer_name, customer_phone, fulfillment_type, delivery_postcode, delivery_address, payment_collection, payment_status, payment_method, card_transaction_id, short_order_code, order_code_date, status, notes, total_price, created_at, updated_at",
+    )
     .eq("restaurant_id", restaurantId)
     .order("created_at", { ascending: false })
 
@@ -399,6 +439,21 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
       isMissingColumnError(orderError, "restaurant_orders", "order_code_date")
     ) {
       throw new Error(missingOrderTrackingMessage())
+    }
+    if (
+      isMissingColumnError(orderError, "restaurant_orders", "fulfillment_type") ||
+      isMissingColumnError(orderError, "restaurant_orders", "delivery_postcode") ||
+      isMissingColumnError(orderError, "restaurant_orders", "delivery_address") ||
+      isMissingColumnError(orderError, "restaurant_orders", "payment_collection")
+    ) {
+      throw new Error(missingOrderFulfillmentMessage())
+    }
+    if (
+      isMissingColumnError(orderError, "restaurant_orders", "payment_status") ||
+      isMissingColumnError(orderError, "restaurant_orders", "payment_method") ||
+      isMissingColumnError(orderError, "restaurant_orders", "card_transaction_id")
+    ) {
+      throw new Error(missingOrderPaymentMessage())
     }
     throw new Error(normalizeOrderTrackingErrorMessage(orderError.message))
   }
@@ -487,6 +542,13 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
     restaurant_id: String(order.restaurant_id),
     customerName: String(order.customer_name || ""),
     customerPhone: order.customer_phone === null ? null : String(order.customer_phone || ""),
+    fulfillmentType: normalizeFulfillmentType(order.fulfillment_type),
+    deliveryPostcode: order.delivery_postcode === null ? null : String(order.delivery_postcode || ""),
+    deliveryAddress: order.delivery_address === null ? null : String(order.delivery_address || ""),
+    paymentCollection: normalizePaymentCollection(order.payment_collection, normalizeFulfillmentType(order.fulfillment_type)),
+    paymentStatus: normalizePaymentStatus(order.payment_status),
+    paymentMethod: normalizePaymentMethod(order.payment_method),
+    cardTransactionId: order.card_transaction_id === null ? null : String(order.card_transaction_id || ""),
     shortOrderCode:
       order.short_order_code === null || order.short_order_code === undefined
         ? null
@@ -507,6 +569,10 @@ export async function saveRestaurantOrder(input: {
   orderId?: string
   customerName: string
   customerPhone: string
+  fulfillmentType: "pickup" | "delivery"
+  deliveryPostcode?: string | null
+  deliveryAddress?: string | null
+  paymentCollection?: "unpaid" | "cod" | null
   status?: "pending" | "closed"
   notes?: string | null
   items: RestaurantOrderRecord["items"]
@@ -516,6 +582,10 @@ export async function saveRestaurantOrder(input: {
   const sanitizedItems = sanitizeOrderItems(input.items)
   const totalPrice = sanitizedItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
   const canUseAtomicStockSync = sanitizedItems.length > 0 && sanitizedItems.every((item) => Boolean(item.menuItemId))
+  const fulfillmentType = normalizeFulfillmentType(input.fulfillmentType)
+  const paymentCollection = normalizePaymentCollection(input.paymentCollection, fulfillmentType)
+  const deliveryPostcode = fulfillmentType === "delivery" ? normalizeOptionalString(input.deliveryPostcode) : null
+  const deliveryAddress = fulfillmentType === "delivery" ? normalizeOptionalString(input.deliveryAddress) : null
 
   if (canUseAtomicStockSync) {
     const { data, error } = await supabase.rpc("save_manual_order_atomic", {
@@ -531,6 +601,10 @@ export async function saveRestaurantOrder(input: {
         quantity: item.quantity,
         unit_price: item.unitPrice,
       })),
+      p_fulfillment_type: fulfillmentType,
+      p_delivery_postcode: deliveryPostcode,
+      p_delivery_address: deliveryAddress,
+      p_payment_collection: paymentCollection,
     })
 
     if (error) {
@@ -539,6 +613,14 @@ export async function saveRestaurantOrder(input: {
         isMissingColumnError(error, "restaurant_order_items", "menu_item_id")
       ) {
         throw new Error(missingManualOrderStockMessage())
+      }
+      if (
+        isMissingColumnError(error, "restaurant_orders", "fulfillment_type") ||
+        isMissingColumnError(error, "restaurant_orders", "delivery_postcode") ||
+        isMissingColumnError(error, "restaurant_orders", "delivery_address") ||
+        isMissingColumnError(error, "restaurant_orders", "payment_collection")
+      ) {
+        throw new Error(missingOrderFulfillmentMessage())
       }
       throw new Error(normalizeOrderTrackingErrorMessage(error.message || "Failed to save order with stock sync"))
     }
@@ -558,6 +640,10 @@ export async function saveRestaurantOrder(input: {
       .update({
         customer_name: input.customerName,
         customer_phone: input.customerPhone,
+        fulfillment_type: fulfillmentType,
+        delivery_postcode: deliveryPostcode,
+        delivery_address: deliveryAddress,
+        payment_collection: paymentCollection,
         status: input.status || "pending",
         notes: input.notes || null,
         total_price: totalPrice,
@@ -572,6 +658,14 @@ export async function saveRestaurantOrder(input: {
       }
       if (isMissingColumnError(updateError, "restaurant_orders", "customer_phone")) {
         throw new Error(missingOrderTrackingMessage())
+      }
+      if (
+        isMissingColumnError(updateError, "restaurant_orders", "fulfillment_type") ||
+        isMissingColumnError(updateError, "restaurant_orders", "delivery_postcode") ||
+        isMissingColumnError(updateError, "restaurant_orders", "delivery_address") ||
+        isMissingColumnError(updateError, "restaurant_orders", "payment_collection")
+      ) {
+        throw new Error(missingOrderFulfillmentMessage())
       }
       throw new Error(normalizeOrderTrackingErrorMessage(updateError.message))
     }
@@ -627,6 +721,10 @@ export async function saveRestaurantOrder(input: {
       restaurant_id: input.restaurantId,
       customer_name: input.customerName,
       customer_phone: input.customerPhone,
+      fulfillment_type: fulfillmentType,
+      delivery_postcode: deliveryPostcode,
+      delivery_address: deliveryAddress,
+      payment_collection: paymentCollection,
       status: input.status || "pending",
       notes: input.notes || null,
       total_price: totalPrice,
@@ -641,6 +739,14 @@ export async function saveRestaurantOrder(input: {
     }
     if (isMissingColumnError(insertOrderError, "restaurant_orders", "customer_phone")) {
       throw new Error(missingOrderTrackingMessage())
+    }
+    if (
+      isMissingColumnError(insertOrderError, "restaurant_orders", "fulfillment_type") ||
+      isMissingColumnError(insertOrderError, "restaurant_orders", "delivery_postcode") ||
+      isMissingColumnError(insertOrderError, "restaurant_orders", "delivery_address") ||
+      isMissingColumnError(insertOrderError, "restaurant_orders", "payment_collection")
+    ) {
+      throw new Error(missingOrderFulfillmentMessage())
     }
     throw new Error(normalizeOrderTrackingErrorMessage(insertOrderError.message))
   }
@@ -680,6 +786,53 @@ export async function saveRestaurantOrder(input: {
   }
 
   return orderId
+}
+
+export async function updateRestaurantOrderPayment(input: {
+  restaurantId: string
+  orderId: string
+  pin: string
+  paymentStatus: "unpaid" | "paid"
+  paymentMethod?: "cash" | "card" | null
+  cardTransactionId?: string | null
+}) {
+  assertSupabaseConfigured()
+
+  const { data, error } = await supabase.functions.invoke<{
+    ok?: boolean
+    order_id?: string
+    payment_status?: string | null
+    payment_method?: string | null
+    card_transaction_id?: string | null
+    error?: string
+    remediation?: string
+  }>("update-order-payment-status", {
+    body: {
+      restaurant_id: input.restaurantId,
+      order_id: input.orderId,
+      pin: input.pin,
+      payment_status: input.paymentStatus,
+      payment_method: input.paymentStatus === "paid" ? input.paymentMethod || null : null,
+      card_transaction_id: input.paymentStatus === "paid" ? input.cardTransactionId || null : null,
+    },
+  })
+
+  if (error) {
+    throw new Error(error.message || "Failed to update order payment.")
+  }
+
+  if (!data?.ok) {
+    throw new Error(
+      [data?.error || "Failed to update order payment.", data?.remediation || ""].filter(Boolean).join(" "),
+    )
+  }
+
+  return {
+    orderId: normalizeOptionalString(data.order_id) || input.orderId,
+    paymentStatus: normalizePaymentStatus(data.payment_status || input.paymentStatus),
+    paymentMethod: normalizePaymentMethod(data.payment_method),
+    cardTransactionId: normalizeOptionalString(data.card_transaction_id),
+  }
 }
 
 export async function deleteRestaurantOrder(input: { restaurantId: string; orderId: string }) {

@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage"
 import * as ImagePicker from "expo-image-picker"
+import * as Print from "expo-print"
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio"
 import { StatusBar as ExpoStatusBar } from "expo-status-bar"
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react"
@@ -15,6 +16,7 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  Switch,
   StyleSheet,
   StatusBar,
   Text,
@@ -47,6 +49,7 @@ import {
   replaceRestaurantMenuItems,
   saveRestaurantOrder,
   saveRestaurant,
+  updateRestaurantOrderPayment,
   saveVoiceAgentLink,
 } from "../db"
 import { createEmptyMenuItem, parseMenuText } from "../menu-parser"
@@ -55,11 +58,15 @@ import type {
   AppMode,
   AppNotice,
   AuthMode,
+  FulfillmentType,
   MenuCustomizationDraft,
   MenuItemDraft,
   MainTab,
   NoticeKind,
   OrderStatusFilter,
+  PaymentCollection,
+  PaymentMethod,
+  PaymentStatus,
   ParseInsertMode,
   RestaurantOrderRecord,
   RestaurantRecord,
@@ -81,9 +88,65 @@ import { MenuScreen } from "./MenuScreen"
 import { createRestaurantVoiceAgent, ELEVENLABS_API_ORIGIN } from "../workspace-api"
 
 const ELEVENLABS_API_KEY_STORAGE_PREFIX = "restaurant-elevenlabs-api-key:"
+const PRINT_PREFERENCES_STORAGE_PREFIX = "restaurant-print-preferences:"
+const ORDER_ALERT_POLL_INTERVAL_MS = 8000
+
+type PrintPreferencesState = {
+  autoPrintEnabled: boolean
+  selectedPrinterId: string
+  selectedPrinterName: string
+  selectedPrinterUrl: string | null
+}
+
+const DEFAULT_PRINT_PREFERENCES: PrintPreferencesState = {
+  autoPrintEnabled: false,
+  selectedPrinterId: "",
+  selectedPrinterName: "",
+  selectedPrinterUrl: null,
+}
+
+type PrinterOption = {
+  id: string
+  name: string
+  printerUrl: string | null
+}
+
+const SYSTEM_PRINT_SHEET_ID = "system-print-sheet"
+
+type DaySummarySnapshot = {
+  reportDateLabel: string
+  printedAtLabel: string
+  totalOrders: number
+  pendingOrders: number
+  completedOrders: number
+  grossTotal: number
+  cashTotal: number
+  creditTotal: number
+  codOutstandingTotal: number
+  unpaidOutstandingTotal: number
+}
+
+type WebSpeechUtteranceLike = {
+  rate: number
+  pitch: number
+  volume: number
+  onend: null | (() => void)
+  onerror: null | (() => void)
+}
+
+type WebSpeechSynthesisLike = {
+  cancel: () => void
+  speak: (utterance: WebSpeechUtteranceLike) => void
+}
+
+type WebSpeechUtteranceCtor = new (text: string) => WebSpeechUtteranceLike
 
 function getElevenLabsApiKeyStorageKey(restaurantId: string) {
   return `${ELEVENLABS_API_KEY_STORAGE_PREFIX}${restaurantId}`
+}
+
+function getPrintPreferencesStorageKey(restaurantId: string) {
+  return `${PRINT_PREFERENCES_STORAGE_PREFIX}${restaurantId}`
 }
 
 async function loadStoredElevenLabsApiKey(restaurantId: string) {
@@ -93,6 +156,125 @@ async function loadStoredElevenLabsApiKey(restaurantId: string) {
 
 async function saveStoredElevenLabsApiKey(restaurantId: string, apiKey: string) {
   await AsyncStorage.setItem(getElevenLabsApiKeyStorageKey(restaurantId), apiKey.trim())
+}
+
+async function loadStoredPrintPreferences(restaurantId: string): Promise<PrintPreferencesState> {
+  try {
+    const rawValue = await AsyncStorage.getItem(getPrintPreferencesStorageKey(restaurantId))
+    if (!rawValue) {
+      return DEFAULT_PRINT_PREFERENCES
+    }
+
+    const parsed = JSON.parse(rawValue) as Partial<PrintPreferencesState> | null
+    const legacyPrinterName = typeof (parsed as { preferredPrinterName?: unknown } | null)?.preferredPrinterName === "string"
+      ? String((parsed as { preferredPrinterName?: unknown }).preferredPrinterName || "").trim()
+      : ""
+    const selectedPrinterId =
+      typeof parsed?.selectedPrinterId === "string" && parsed.selectedPrinterId.trim()
+        ? parsed.selectedPrinterId.trim()
+        : legacyPrinterName
+          ? `legacy:${legacyPrinterName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+          : ""
+    const selectedPrinterName =
+      typeof parsed?.selectedPrinterName === "string" && parsed.selectedPrinterName.trim()
+        ? parsed.selectedPrinterName.trim()
+        : legacyPrinterName
+    const selectedPrinterUrl =
+      typeof parsed?.selectedPrinterUrl === "string" && parsed.selectedPrinterUrl.trim()
+        ? parsed.selectedPrinterUrl.trim()
+        : null
+
+    return {
+      autoPrintEnabled: Boolean(parsed?.autoPrintEnabled) && Boolean(selectedPrinterId),
+      selectedPrinterId,
+      selectedPrinterName,
+      selectedPrinterUrl,
+    }
+  } catch {
+    return DEFAULT_PRINT_PREFERENCES
+  }
+}
+
+async function saveStoredPrintPreferences(restaurantId: string, preferences: PrintPreferencesState) {
+  const payload: PrintPreferencesState = {
+    autoPrintEnabled: Boolean(preferences.autoPrintEnabled),
+    selectedPrinterId: preferences.selectedPrinterId.trim(),
+    selectedPrinterName: preferences.selectedPrinterName.trim(),
+    selectedPrinterUrl: preferences.selectedPrinterUrl?.trim() || null,
+  }
+
+  await AsyncStorage.setItem(getPrintPreferencesStorageKey(restaurantId), JSON.stringify(payload))
+}
+
+function getDefaultPrinterOptions(): PrinterOption[] {
+  if (Platform.OS === "ios") {
+    return []
+  }
+
+  return [
+    {
+      id: SYSTEM_PRINT_SHEET_ID,
+      name: "System print sheet",
+      printerUrl: null,
+    },
+  ]
+}
+
+function mergePrinterOptions(...optionGroups: Array<PrinterOption[]>): PrinterOption[] {
+  const uniqueOptions = new Map<string, PrinterOption>()
+
+  optionGroups.flat().forEach((option) => {
+    const optionId = option.id.trim()
+    const optionName = option.name.trim()
+    if (!optionId || !optionName) {
+      return
+    }
+
+    const mapKey = option.printerUrl?.trim() || optionId
+    if (!uniqueOptions.has(mapKey)) {
+      uniqueOptions.set(mapKey, {
+        id: optionId,
+        name: optionName,
+        printerUrl: option.printerUrl?.trim() || null,
+      })
+    }
+  })
+
+  return Array.from(uniqueOptions.values())
+}
+
+function getStoredPrinterOption(preferences: PrintPreferencesState): PrinterOption[] {
+  if (!preferences.selectedPrinterId.trim() || !preferences.selectedPrinterName.trim()) {
+    return []
+  }
+
+  return [
+    {
+      id: preferences.selectedPrinterId.trim(),
+      name: preferences.selectedPrinterName.trim(),
+      printerUrl: preferences.selectedPrinterUrl?.trim() || null,
+    },
+  ]
+}
+
+function getWebSpeechRuntime(): { synthesis: WebSpeechSynthesisLike; UtteranceCtor: WebSpeechUtteranceCtor } | null {
+  if (Platform.OS !== "web") {
+    return null
+  }
+
+  const root = globalThis as typeof globalThis & {
+    speechSynthesis?: WebSpeechSynthesisLike
+    SpeechSynthesisUtterance?: WebSpeechUtteranceCtor
+  }
+
+  if (!root.speechSynthesis || !root.SpeechSynthesisUtterance) {
+    return null
+  }
+
+  return {
+    synthesis: root.speechSynthesis,
+    UtteranceCtor: root.SpeechSynthesisUtterance,
+  }
 }
 
 function maskApiKey(value: string) {
@@ -225,6 +407,8 @@ const WEB_TEXT_INPUT_RESET = (Platform.OS === "web"
   ? {
       outlineStyle: "none",
       outlineWidth: 0,
+      outlineColor: "transparent",
+      boxShadow: "none",
     }
   : {}) as Record<string, unknown>
 
@@ -864,6 +1048,13 @@ function orderToUiDraft(order: RestaurantOrderRecord): UiOrderDraft {
     id: order.id,
     customerName: order.customerName,
     customerPhone: order.customerPhone || "",
+    fulfillmentType: order.fulfillmentType || "pickup",
+    deliveryPostcode: order.deliveryPostcode || "",
+    deliveryAddress: order.deliveryAddress || "",
+    paymentCollection: order.paymentCollection || "unpaid",
+    paymentStatus: order.paymentStatus || "unpaid",
+    paymentMethod: order.paymentMethod || "",
+    cardTransactionId: order.cardTransactionId || "",
     shortOrderCode: order.shortOrderCode ?? null,
     orderCodeDate: order.orderCodeDate ?? null,
     createdAt: order.created_at ?? null,
@@ -885,6 +1076,13 @@ function createEmptyOrderDraft(): UiOrderDraft {
   return {
     customerName: "",
     customerPhone: "",
+    fulfillmentType: "pickup",
+    deliveryPostcode: "",
+    deliveryAddress: "",
+    paymentCollection: "unpaid",
+    paymentStatus: "unpaid",
+    paymentMethod: "",
+    cardTransactionId: "",
     shortOrderCode: null,
     orderCodeDate: null,
     createdAt: null,
@@ -1314,6 +1512,95 @@ function matchesOrderStatusFilter(status: string | null | undefined, filter: Ord
   return getOrderStatusTone(status) === filter
 }
 
+function normalizeFulfillmentType(value: unknown): FulfillmentType {
+  return String(value || "").trim().toLowerCase() === "delivery" ? "delivery" : "pickup"
+}
+
+function normalizeUkPostcode(value: unknown): string {
+  const compact = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "")
+
+  if (!compact) {
+    return ""
+  }
+
+  if (compact.length <= 3) {
+    return compact
+  }
+
+  return `${compact.slice(0, -3)} ${compact.slice(-3)}`
+}
+
+function looksLikeUkPostcode(value: string): boolean {
+  return /^[A-Z]{1,2}\d[A-Z\d]?\s\d[A-Z]{2}$/.test(value)
+}
+
+function resolvePaymentCollection(
+  fulfillmentType: FulfillmentType,
+  explicitValue?: PaymentCollection | string | null,
+): PaymentCollection {
+  const normalized = String(explicitValue || "")
+    .trim()
+    .toLowerCase()
+
+  if (normalized === "cod" || normalized === "unpaid") {
+    return normalized as PaymentCollection
+  }
+
+  return fulfillmentType === "delivery" ? "cod" : "unpaid"
+}
+
+function normalizePaymentStatus(value: unknown): PaymentStatus {
+  return String(value || "").trim().toLowerCase() === "paid" ? "paid" : "unpaid"
+}
+
+function normalizePaymentMethod(value: unknown): PaymentMethod | null {
+  const normalized = String(value || "").trim().toLowerCase()
+  if (normalized === "cash" || normalized === "card") {
+    return normalized as PaymentMethod
+  }
+  return null
+}
+
+function getFulfillmentTypeLabel(value: FulfillmentType | string | null | undefined): string {
+  return normalizeFulfillmentType(value) === "delivery" ? "DELIVERY" : "PICKUP"
+}
+
+function getPaymentCollectionLabel(value: PaymentCollection | string | null | undefined): string {
+  return String(value || "").trim().toLowerCase() === "cod" ? "COD" : "UNPAID"
+}
+
+function getOrderPaymentDisplayLabel(params: {
+  fulfillmentType?: FulfillmentType | string | null
+  paymentCollection?: PaymentCollection | string | null
+  paymentStatus?: PaymentStatus | string | null
+  paymentMethod?: PaymentMethod | string | null
+}): string {
+  const paymentStatus = normalizePaymentStatus(params.paymentStatus)
+  const paymentMethod = normalizePaymentMethod(params.paymentMethod)
+  const paymentCollection = resolvePaymentCollection(
+    normalizeFulfillmentType(params.fulfillmentType),
+    params.paymentCollection,
+  )
+
+  if (paymentStatus === "paid") {
+    if (paymentMethod === "card") {
+      return "CARD"
+    }
+    if (paymentMethod === "cash") {
+      return "CASH"
+    }
+  }
+
+  if (paymentCollection === "cod") {
+    return "COD"
+  }
+
+  return "UNPAID"
+}
+
 type ReceiptLineItem = {
   name?: string | null
   item_name?: string | null
@@ -1328,10 +1615,17 @@ type ReceiptOrder = {
   short_code?: string | number | null
   status?: string | null
   created_at?: string | null
+  fulfillment_type?: FulfillmentType | string | null
+  payment_collection?: PaymentCollection | string | null
+  payment_status?: PaymentStatus | string | null
+  payment_method?: PaymentMethod | string | null
   customer_name?: string | null
   contact_name?: string | null
   customer_phone?: string | null
   contact_phone?: string | null
+  delivery_postcode?: string | null
+  delivery_address?: string | null
+  card_transaction_id?: string | null
   notes?: string | null
   special_instructions?: string | null
   total_amount?: number | string | null
@@ -1350,6 +1644,13 @@ type ActiveOrderEditorState = {
   mode: "edit" | "add"
   index: number
   snapshot: UiOrderDraft
+}
+
+type ActivePaymentUpdateState = {
+  index: number
+  pin: string
+  paymentMethod: PaymentMethod
+  cardTransactionId: string
 }
 
 type MenuCustomizationGroup = {
@@ -1410,6 +1711,16 @@ function renderReceiptContent(order: ReceiptOrder | null, restaurantName: string
   const total = formatCurrencyDisplay(Number(getReceiptNumericString(order?.total_amount || order?.total || 0)))
   const customerName = String(order?.customer_name || order?.contact_name || "Guest")
   const customerPhone = String(order?.customer_phone || order?.contact_phone || "").trim()
+  const fulfillmentType = getFulfillmentTypeLabel(order?.fulfillment_type)
+  const paymentCollection = getOrderPaymentDisplayLabel({
+    fulfillmentType: order?.fulfillment_type,
+    paymentCollection: order?.payment_collection,
+    paymentStatus: order?.payment_status,
+    paymentMethod: order?.payment_method,
+  })
+  const cardTransactionId = String(order?.card_transaction_id || "").trim()
+  const deliveryPostcode = normalizeUkPostcode(order?.delivery_postcode)
+  const deliveryAddress = String(order?.delivery_address || "").trim()
   const notes = String(order?.notes || order?.special_instructions || "").trim()
   const orderCode = String(order?.short_code || order?.id || "\u2014")
   const status = getOrderStatusLabel(order?.status)
@@ -1433,10 +1744,36 @@ function renderReceiptContent(order: ReceiptOrder | null, restaurantName: string
         <Text style={styles.thermalReceiptMetaLabel}>Customer:</Text>
         <Text style={styles.thermalReceiptMetaValue}>{customerName}</Text>
       </View>
+      <View style={styles.thermalReceiptMetaRow}>
+        <Text style={styles.thermalReceiptMetaLabel}>Order Type:</Text>
+        <Text style={styles.thermalReceiptMetaValue}>{fulfillmentType}</Text>
+      </View>
+      <View style={styles.thermalReceiptMetaRow}>
+        <Text style={styles.thermalReceiptMetaLabel}>Payment:</Text>
+        <Text style={styles.thermalReceiptMetaValue}>{paymentCollection}</Text>
+      </View>
       {customerPhone ? (
         <View style={styles.thermalReceiptMetaRow}>
           <Text style={styles.thermalReceiptMetaLabel}>Phone:</Text>
           <Text style={styles.thermalReceiptMetaValue}>{customerPhone}</Text>
+        </View>
+      ) : null}
+      {deliveryPostcode ? (
+        <View style={styles.thermalReceiptMetaRow}>
+          <Text style={styles.thermalReceiptMetaLabel}>Postcode:</Text>
+          <Text style={styles.thermalReceiptMetaValue}>{deliveryPostcode}</Text>
+        </View>
+      ) : null}
+      {deliveryAddress ? (
+        <View style={styles.thermalReceiptMetaRow}>
+          <Text style={styles.thermalReceiptMetaLabel}>Address:</Text>
+          <Text style={styles.thermalReceiptMetaValue}>{deliveryAddress}</Text>
+        </View>
+      ) : null}
+      {cardTransactionId ? (
+        <View style={styles.thermalReceiptMetaRow}>
+          <Text style={styles.thermalReceiptMetaLabel}>Card Ref:</Text>
+          <Text style={styles.thermalReceiptMetaValue}>{cardTransactionId}</Text>
         </View>
       ) : null}
       {notes ? (
@@ -1536,6 +1873,18 @@ function getLegacyReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string)
   const orderCode = escapeReceiptHtml(String(order.short_code || order.id || ""))
   const customerName = escapeReceiptHtml(String(order.customer_name || order.contact_name || "Guest"))
   const phone = escapeReceiptHtml(String(order.customer_phone || order.contact_phone || ""))
+  const fulfillmentType = escapeReceiptHtml(getFulfillmentTypeLabel(order.fulfillment_type))
+  const paymentCollection = escapeReceiptHtml(
+    getOrderPaymentDisplayLabel({
+      fulfillmentType: order.fulfillment_type,
+      paymentCollection: order.payment_collection,
+      paymentStatus: order.payment_status,
+      paymentMethod: order.payment_method,
+    }),
+  )
+  const deliveryPostcode = escapeReceiptHtml(normalizeUkPostcode(order.delivery_postcode || ""))
+  const deliveryAddress = escapeReceiptHtml(String(order.delivery_address || "").trim())
+  const cardTransactionId = escapeReceiptHtml(String(order.card_transaction_id || "").trim())
   const notes = escapeReceiptHtml(String(order.notes || order.special_instructions || ""))
   const dateStr = formatReceiptDate(order.created_at)
 
@@ -1561,7 +1910,18 @@ function getLegacyReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string)
     <span>Customer:</span>
     <span class="bold">${customerName}</span>
   </div>
+  <div class="meta-row">
+    <span>Order Type:</span>
+    <span>${fulfillmentType}</span>
+  </div>
+  <div class="meta-row">
+    <span>Payment:</span>
+    <span>${paymentCollection}</span>
+  </div>
   ${phone ? `<div class="meta-row"><span>Phone:</span><span>${phone}</span></div>` : ""}
+  ${deliveryPostcode ? `<div class="meta-row"><span>Postcode:</span><span>${deliveryPostcode}</span></div>` : ""}
+  ${deliveryAddress ? `<div class="meta-row"><span>Address:</span><span>${deliveryAddress}</span></div>` : ""}
+  ${cardTransactionId ? `<div class="meta-row"><span>Card Ref:</span><span>${cardTransactionId}</span></div>` : ""}
   ${notes ? `<div class="meta-row"><span>Notes:</span><span>${notes}</span></div>` : ""}
   <hr class="dashed">
 
@@ -1790,6 +2150,18 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
   const orderCode = escapeReceiptHtml(String(order.short_code || order.id || ""))
   const customerName = escapeReceiptHtml(String(order.customer_name || order.contact_name || "Guest"))
   const phone = escapeReceiptHtml(String(order.customer_phone || order.contact_phone || ""))
+  const fulfillmentType = escapeReceiptHtml(getFulfillmentTypeLabel(order.fulfillment_type))
+  const paymentCollection = escapeReceiptHtml(
+    getOrderPaymentDisplayLabel({
+      fulfillmentType: order.fulfillment_type,
+      paymentCollection: order.payment_collection,
+      paymentStatus: order.payment_status,
+      paymentMethod: order.payment_method,
+    }),
+  )
+  const deliveryPostcode = escapeReceiptHtml(normalizeUkPostcode(order.delivery_postcode || ""))
+  const deliveryAddress = escapeReceiptHtml(String(order.delivery_address || "").trim())
+  const cardTransactionId = escapeReceiptHtml(String(order.card_transaction_id || "").trim())
   const notes = escapeReceiptHtml(String(order.notes || order.special_instructions || ""))
   const dateStr = formatReceiptDate(order.created_at)
 
@@ -1812,7 +2184,18 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
     <span>Customer:</span>
     <span class="bold">${customerName}</span>
   </div>
+  <div class="meta-row">
+    <span>Order Type:</span>
+    <span>${fulfillmentType}</span>
+  </div>
+  <div class="meta-row">
+    <span>Payment:</span>
+    <span>${paymentCollection}</span>
+  </div>
   ${phone ? `<div class="meta-row"><span>Phone:</span><span>${phone}</span></div>` : ""}
+  ${deliveryPostcode ? `<div class="meta-row"><span>Postcode:</span><span>${deliveryPostcode}</span></div>` : ""}
+  ${deliveryAddress ? `<div class="meta-row"><span>Address:</span><span>${deliveryAddress}</span></div>` : ""}
+  ${cardTransactionId ? `<div class="meta-row"><span>Card Ref:</span><span>${cardTransactionId}</span></div>` : ""}
   ${notes ? `<div class="meta-row"><span>Notes:</span><span>${notes}</span></div>` : ""}
   <div class="divider">--------------------------------</div>
 
@@ -2203,6 +2586,23 @@ function renderCompactOrderLines(items: RestaurantOrderRecord["items"], params?:
   )
 }
 
+function isSameLocalCalendarDay(value: string | null | undefined, referenceDate: Date) {
+  if (!value) {
+    return false
+  }
+
+  const parsedDate = new Date(value)
+  if (Number.isNaN(parsedDate.getTime())) {
+    return false
+  }
+
+  return (
+    parsedDate.getFullYear() === referenceDate.getFullYear() &&
+    parsedDate.getMonth() === referenceDate.getMonth() &&
+    parsedDate.getDate() === referenceDate.getDate()
+  )
+}
+
 export default function App() {
   const isWeb = Platform.OS === "web"
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions()
@@ -2279,6 +2679,10 @@ export default function App() {
   const [menuLoading, setMenuLoading] = useState(false)
   const [orders, setOrders] = useState<RestaurantOrderRecord[]>([])
   const [orderDrafts, setOrderDrafts] = useState<UiOrderDraft[]>([])
+  const [printPreferences, setPrintPreferences] = useState<PrintPreferencesState>(DEFAULT_PRINT_PREFERENCES)
+  const [availablePrinterOptions, setAvailablePrinterOptions] = useState<PrinterOption[]>(() => getDefaultPrinterOptions())
+  const [isPrintCenterVisible, setIsPrintCenterVisible] = useState(false)
+  const [isPrinterDropdownOpen, setIsPrinterDropdownOpen] = useState(false)
   const [statusFilter, setStatusFilter] = useState<OrderStatusFilter>("pending")
   const [previewOrder, setPreviewOrder] = useState<UiOrderDraft | null>(null)
   const previewLongPressKeyRef = useRef<string | null>(null)
@@ -2290,14 +2694,105 @@ export default function App() {
     title: string
     callReview: RestaurantOrderRecord["callReview"]
   } | null>(null)
+  const [activePaymentUpdate, setActivePaymentUpdate] = useState<ActivePaymentUpdateState | null>(null)
   const callReviewPlayer = useAudioPlayer(activeCallReview?.callReview?.recordingUrl?.trim() || undefined, { updateInterval: 250 })
   const callReviewPlayerStatus = useAudioPlayerStatus(callReviewPlayer)
+  const newOrderChimePlayer = useAudioPlayer(require("../../assets/audio/order-chime.wav"), { updateInterval: 250 })
+  const newOrderChimeStatus = useAudioPlayerStatus(newOrderChimePlayer)
+  const knownOrderIdsRef = useRef<Set<string>>(new Set())
+  const orderRefreshInFlightRef = useRef(false)
+  const queuedNewOrderAlertCountsRef = useRef<number[]>([])
+  const activeNewOrderAlertCountRef = useRef(0)
+  const newOrderAlertInFlightRef = useRef(false)
+  const newOrderSpeechTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [elevenLabsApiKey, setElevenLabsApiKey] = useState("")
   const [savedElevenLabsApiKey, setSavedElevenLabsApiKey] = useState("")
   const [isEditingElevenLabsApiKey, setIsEditingElevenLabsApiKey] = useState(false)
   const [manualAgentId, setManualAgentId] = useState("")
   const [voiceAgentLink, setVoiceAgentLink] = useState<VoiceAgentLinkRecord | null>(null)
+
+  function clearQueuedNewOrderSpeechTimeout() {
+    if (!newOrderSpeechTimeoutRef.current) {
+      return
+    }
+
+    clearTimeout(newOrderSpeechTimeoutRef.current)
+    newOrderSpeechTimeoutRef.current = null
+  }
+
+  function finishQueuedNewOrderAlert() {
+    clearQueuedNewOrderSpeechTimeout()
+    activeNewOrderAlertCountRef.current = 0
+    newOrderAlertInFlightRef.current = false
+
+    const webSpeechRuntime = getWebSpeechRuntime()
+    if (webSpeechRuntime) {
+      try {
+        webSpeechRuntime.synthesis.cancel()
+      } catch {}
+    }
+
+    if (queuedNewOrderAlertCountsRef.current.length === 0) {
+      return
+    }
+
+    const nextCount = queuedNewOrderAlertCountsRef.current.shift() || 0
+    if (!nextCount) {
+      finishQueuedNewOrderAlert()
+      return
+    }
+
+    activeNewOrderAlertCountRef.current = nextCount
+    newOrderAlertInFlightRef.current = true
+
+    try {
+      newOrderChimePlayer.pause()
+      newOrderChimePlayer.seekTo(0)
+    } catch {}
+
+    try {
+      newOrderChimePlayer.play()
+    } catch {
+      finishQueuedNewOrderAlert()
+    }
+  }
+
+  function speakQueuedNewOrderAlert(count: number) {
+    const announcementText = count > 1 ? `${count} new orders` : "New order"
+    const webSpeechRuntime = getWebSpeechRuntime()
+
+    if (!webSpeechRuntime) {
+      finishQueuedNewOrderAlert()
+      return
+    }
+
+    try {
+      webSpeechRuntime.synthesis.cancel()
+      const utterance = new webSpeechRuntime.UtteranceCtor(announcementText)
+      utterance.rate = 0.92
+      utterance.pitch = 1
+      utterance.volume = 1
+      utterance.onend = () => finishQueuedNewOrderAlert()
+      utterance.onerror = () => finishQueuedNewOrderAlert()
+      clearQueuedNewOrderSpeechTimeout()
+      newOrderSpeechTimeoutRef.current = setTimeout(() => finishQueuedNewOrderAlert(), 3500)
+      webSpeechRuntime.synthesis.speak(utterance)
+    } catch {
+      finishQueuedNewOrderAlert()
+    }
+  }
+
+  function queueNewOrderAlert(count: number) {
+    if (count <= 0) {
+      return
+    }
+
+    queuedNewOrderAlertCountsRef.current.push(count)
+    if (!newOrderAlertInFlightRef.current) {
+      finishQueuedNewOrderAlert()
+    }
+  }
 
   useEffect(() => {
     if (!appNotice) {
@@ -2356,6 +2851,31 @@ export default function App() {
   }, [callReviewPlayer, callReviewPlayerStatus.didJustFinish])
 
   useEffect(() => {
+    if (!newOrderChimeStatus.didJustFinish || !newOrderAlertInFlightRef.current) {
+      return
+    }
+
+    try {
+      newOrderChimePlayer.pause()
+      newOrderChimePlayer.seekTo(0)
+    } catch {}
+
+    speakQueuedNewOrderAlert(Math.max(1, activeNewOrderAlertCountRef.current || 1))
+  }, [newOrderChimePlayer, newOrderChimeStatus.didJustFinish])
+
+  useEffect(() => {
+    return () => {
+      clearQueuedNewOrderSpeechTimeout()
+      const webSpeechRuntime = getWebSpeechRuntime()
+      if (webSpeechRuntime) {
+        try {
+          webSpeechRuntime.synthesis.cancel()
+        } catch {}
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     if (!activeOrderItemPicker) {
       return
     }
@@ -2382,6 +2902,15 @@ export default function App() {
       setActiveOrderEditor(null)
     }
   }, [activeOrderEditor, orderDrafts])
+
+  useEffect(() => {
+    if (!activePaymentUpdate) {
+      return
+    }
+    if (!orderDrafts[activePaymentUpdate.index]) {
+      setActivePaymentUpdate(null)
+    }
+  }, [activePaymentUpdate, orderDrafts])
 
   const [activeTab, setActiveTab] = useState<MainTab>(() => (getInitialAppMode() === "pos" ? "orders" : "overview"))
   const [appMode, setAppMode] = useState<AppMode>(getInitialAppMode)
@@ -2455,10 +2984,27 @@ export default function App() {
   }, [user])
 
   useEffect(() => {
-    if (appMode === "pos" && activeTab !== "orders") {
+    if (appMode === "pos" && activeTab !== "orders" && activeTab !== "summary") {
       setActiveTab("orders")
     }
   }, [appMode, activeTab])
+
+  useEffect(() => {
+    if (appMode === "admin") {
+      return
+    }
+
+    setIsPrintCenterVisible(false)
+    setIsPrinterDropdownOpen(false)
+  }, [appMode])
+
+  useEffect(() => {
+    if (printPreferences.selectedPrinterId.trim() || !printPreferences.autoPrintEnabled) {
+      return
+    }
+
+    setPrintPreferences((current) => ({ ...current, autoPrintEnabled: false }))
+  }, [printPreferences.autoPrintEnabled, printPreferences.selectedPrinterId])
 
   useEffect(() => {
     if (!isWeb || typeof window === "undefined") {
@@ -2507,6 +3053,11 @@ export default function App() {
       setSavedElevenLabsApiKey("")
       setIsEditingElevenLabsApiKey(false)
       setManualAgentId("")
+      setPrintPreferences(DEFAULT_PRINT_PREFERENCES)
+      setAvailablePrinterOptions(getDefaultPrinterOptions())
+      setIsPrintCenterVisible(false)
+      setIsPrinterDropdownOpen(false)
+      knownOrderIdsRef.current = new Set()
       return
     }
     let cancelled = false
@@ -2519,6 +3070,10 @@ export default function App() {
     setScanId(null)
     setDraftItems([])
     setMenuLoading(true)
+    setPrintPreferences(DEFAULT_PRINT_PREFERENCES)
+    setAvailablePrinterOptions(getDefaultPrinterOptions())
+    setIsPrinterDropdownOpen(false)
+    knownOrderIdsRef.current = new Set()
     setActiveOrderEditor(null)
     setActiveOrderItemPicker(null)
     setActiveItemCustomization(null)
@@ -2526,11 +3081,12 @@ export default function App() {
     setActiveCallReview(null)
     ;(async () => {
       try {
-        const [items, fetchedOrders, voiceLink, storedApiKey] = await Promise.all([
+        const [items, fetchedOrders, voiceLink, storedApiKey, storedPrintPreferences] = await Promise.all([
           listRestaurantMenuItems(selectedRestaurant.id),
           listRestaurantOrders(selectedRestaurant.id),
           getVoiceAgentLink(selectedRestaurant.id),
           loadStoredElevenLabsApiKey(selectedRestaurant.id),
+          loadStoredPrintPreferences(selectedRestaurant.id),
         ])
 
         if (cancelled) {
@@ -2547,6 +3103,11 @@ export default function App() {
         setElevenLabsApiKey(storedApiKey)
         setIsEditingElevenLabsApiKey(Boolean(voiceLink) && !storedApiKey)
         setManualAgentId(voiceLink?.workspace_agent_id || "")
+        setPrintPreferences(storedPrintPreferences)
+        setAvailablePrinterOptions(mergePrinterOptions(getDefaultPrinterOptions(), getStoredPrinterOption(storedPrintPreferences)))
+        knownOrderIdsRef.current = new Set(
+          fetchedOrders.map((order) => String(order.id || "").trim()).filter((orderId) => orderId.length > 0),
+        )
       } catch (error) {
         if (cancelled) {
           return
@@ -2565,6 +3126,56 @@ export default function App() {
     }
   }, [selectedRestaurantId, selectedRestaurant])
 
+  useEffect(() => {
+    queuedNewOrderAlertCountsRef.current = []
+    activeNewOrderAlertCountRef.current = 0
+    newOrderAlertInFlightRef.current = false
+    clearQueuedNewOrderSpeechTimeout()
+
+    const webSpeechRuntime = getWebSpeechRuntime()
+    if (webSpeechRuntime) {
+      try {
+        webSpeechRuntime.synthesis.cancel()
+      } catch {}
+    }
+
+    try {
+      newOrderChimePlayer.pause()
+      newOrderChimePlayer.seekTo(0)
+    } catch {}
+  }, [newOrderChimePlayer, selectedRestaurantId])
+
+  useEffect(() => {
+    if (!user || !selectedRestaurant?.id) {
+      return
+    }
+
+    const intervalId = setInterval(() => {
+      if (
+        busy ||
+        orderRefreshInFlightRef.current ||
+        activeOrderEditor ||
+        activeOrderItemPicker ||
+        activeItemCustomization ||
+        activePaymentUpdate
+      ) {
+        return
+      }
+
+      void refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: false, showRefreshErrors: false })
+    }, ORDER_ALERT_POLL_INTERVAL_MS)
+
+    return () => clearInterval(intervalId)
+  }, [
+    activeItemCustomization,
+    activeOrderEditor,
+    activeOrderItemPicker,
+    activePaymentUpdate,
+    busy,
+    selectedRestaurant?.id,
+    user?.id,
+  ])
+
   async function refreshRestaurants(ownerUserId: string) {
     const rows = await listRestaurants(ownerUserId)
     setRestaurants(rows)
@@ -2575,10 +3186,46 @@ export default function App() {
     }
   }
 
-  async function refreshOrders(restaurantId: string) {
-    const fetchedOrders = await listRestaurantOrders(restaurantId)
-    setOrders(fetchedOrders)
-    setOrderDrafts(fetchedOrders.map(orderToUiDraft))
+  async function refreshOrders(
+    restaurantId: string,
+    options?: { suppressNewOrderExperience?: boolean; showRefreshErrors?: boolean },
+  ) {
+    if (orderRefreshInFlightRef.current) {
+      return
+    }
+
+    orderRefreshInFlightRef.current = true
+
+    try {
+      const [fetchedOrders, fetchedMenuItems] = await Promise.all([
+        listRestaurantOrders(restaurantId),
+        listRestaurantMenuItems(restaurantId),
+      ])
+      const nextKnownOrderIds = new Set(
+        fetchedOrders.map((order) => String(order.id || "").trim()).filter((orderId) => orderId.length > 0),
+      )
+      const newOrders = fetchedOrders.filter((order) => {
+        const orderId = String(order.id || "").trim()
+        return orderId.length > 0 && !knownOrderIdsRef.current.has(orderId)
+      })
+
+      knownOrderIdsRef.current = nextKnownOrderIds
+      setSavedItems(dedupeMenuItems(fetchedMenuItems))
+      setOrders(fetchedOrders)
+      setOrderDrafts(fetchedOrders.map(orderToUiDraft))
+
+      if (!options?.suppressNewOrderExperience && newOrders.length > 0) {
+        void handleIncomingOrders(newOrders)
+      }
+    } catch (error) {
+      if (options?.showRefreshErrors === false) {
+        console.error("Background order refresh error:", error)
+        return
+      }
+      throw error
+    } finally {
+      orderRefreshInFlightRef.current = false
+    }
   }
 
   async function handleAuth() {
@@ -2962,6 +3609,106 @@ export default function App() {
       return
     }
     setActiveCallReview({ title, callReview })
+  }
+
+  function openPaymentUpdateModal(index: number) {
+    const draft = orderDrafts[index]
+    if (!draft) {
+      return
+    }
+
+    if (!draft.id) {
+      showNotification("Save Required", "Save the order before updating payment status.", "warning")
+      return
+    }
+
+    setActivePaymentUpdate({
+      index,
+      pin: "",
+      paymentMethod: normalizePaymentMethod(draft.paymentMethod) || "cash",
+      cardTransactionId: draft.cardTransactionId || "",
+    })
+  }
+
+  function closePaymentUpdateModal() {
+    setActivePaymentUpdate(null)
+  }
+
+  async function submitOrderPaymentUpdate(params: {
+    index: number
+    paymentStatus: PaymentStatus
+    paymentMethod?: PaymentMethod | null
+    cardTransactionId?: string | null
+    successTitle: string
+    successMessage: string
+  }) {
+    if (!selectedRestaurant) {
+      return
+    }
+
+    const draft = orderDrafts[params.index]
+    if (!draft?.id || !activePaymentUpdate) {
+      return
+    }
+
+    if (!activePaymentUpdate.pin.trim()) {
+      showNotification("PIN Required", "Enter the payment PIN before updating payment status.", "warning")
+      return
+    }
+
+    setBusy(true)
+    try {
+      await updateRestaurantOrderPayment({
+        restaurantId: selectedRestaurant.id,
+        orderId: draft.id,
+        pin: activePaymentUpdate.pin.trim(),
+        paymentStatus: params.paymentStatus,
+        paymentMethod: params.paymentMethod || null,
+        cardTransactionId: params.cardTransactionId || null,
+      })
+      await refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: true })
+      setActivePaymentUpdate(null)
+      showNotification(params.successTitle, params.successMessage, "success")
+    } catch (error) {
+      showNotification(
+        "Payment Update Failed",
+        error instanceof Error ? error.message : "Failed to update payment status.",
+        "error",
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleConfirmPaidOrder() {
+    if (!activePaymentUpdate) {
+      return
+    }
+
+    const paymentMethod = activePaymentUpdate.paymentMethod
+    await submitOrderPaymentUpdate({
+      index: activePaymentUpdate.index,
+      paymentStatus: "paid",
+      paymentMethod,
+      cardTransactionId: paymentMethod === "card" ? activePaymentUpdate.cardTransactionId.trim() || null : null,
+      successTitle: "Payment Updated",
+      successMessage: paymentMethod === "card" ? "Order marked as card paid." : "Order marked as cash paid.",
+    })
+  }
+
+  async function handleResetOrderToUnpaid() {
+    if (!activePaymentUpdate) {
+      return
+    }
+
+    await submitOrderPaymentUpdate({
+      index: activePaymentUpdate.index,
+      paymentStatus: "unpaid",
+      paymentMethod: null,
+      cardTransactionId: null,
+      successTitle: "Payment Updated",
+      successMessage: "Order moved back to unpaid.",
+    })
   }
 
   function closeOrderCallReview() {
@@ -3463,6 +4210,106 @@ export default function App() {
     Alert.alert(title, message)
   }
 
+  function getPersistedOrderForDraft(index: number) {
+    const draft = orderDrafts[index]
+    const draftOrderId = draft?.id?.trim()
+    if (!draftOrderId) {
+      return null
+    }
+
+    return orders.find((order) => String(order.id || "").trim() === draftOrderId) || null
+  }
+
+  function getSelectedMenuItemQuantity(
+    items: RestaurantOrderRecord["items"],
+    menuItem: MenuItemDraft,
+  ) {
+    return items
+      .filter((entry) => matchesDraftOrderItemToMenuItem(entry, menuItem))
+      .reduce((sum, entry) => sum + Math.max(1, Number(entry.quantity || 1)), 0)
+  }
+
+  function getLocalSelectableQuantityForMenuItem(index: number, menuItem: MenuItemDraft) {
+    const liveStockQuantity = Math.max(0, Number(menuItem.stockQuantity || 0))
+    const persistedOrder = getPersistedOrderForDraft(index)
+    const persistedReservedQuantity = persistedOrder
+      ? getSelectedMenuItemQuantity(persistedOrder.items || [], menuItem)
+      : 0
+
+    return Math.max(0, liveStockQuantity + persistedReservedQuantity)
+  }
+
+  function getRemainingLocalQuantityForMenuItem(index: number, menuItem: MenuItemDraft) {
+    const draft = orderDrafts[index]
+    if (!draft) {
+      return Math.max(0, Number(menuItem.stockQuantity || 0))
+    }
+
+    const selectedItems = parseOrderItemsFromText(draft.itemsText)
+    const selectedQuantity = getSelectedMenuItemQuantity(selectedItems, menuItem)
+    const maxSelectableQuantity = getLocalSelectableQuantityForMenuItem(index, menuItem)
+    return Math.max(0, maxSelectableQuantity - selectedQuantity)
+  }
+
+  function ensureDraftCanAddMenuItem(index: number, menuItem: MenuItemDraft, incrementBy = 1) {
+    const draft = orderDrafts[index]
+    if (!draft) {
+      return false
+    }
+
+    const selectedItems = parseOrderItemsFromText(draft.itemsText)
+    const selectedQuantity = getSelectedMenuItemQuantity(selectedItems, menuItem)
+    const maxSelectableQuantity = getLocalSelectableQuantityForMenuItem(index, menuItem)
+
+    if (selectedQuantity + incrementBy <= maxSelectableQuantity) {
+      return true
+    }
+
+    if (maxSelectableQuantity <= 0) {
+      showOrderValidationAlert(`${menuItem.name} is out of stock right now.`)
+      return false
+    }
+
+    showOrderValidationAlert(`Only ${maxSelectableQuantity} available for ${menuItem.name} right now.`)
+    return false
+  }
+
+  function validateDraftItemsAgainstLocalStock(
+    index: number,
+    items: RestaurantOrderRecord["items"],
+  ) {
+    const groupedRequestedQuantities = new Map<string, number>()
+
+    for (const item of items) {
+      const menuItemId = item.menuItemId?.trim() || ""
+      if (!menuItemId) {
+        continue
+      }
+
+      groupedRequestedQuantities.set(
+        menuItemId,
+        (groupedRequestedQuantities.get(menuItemId) || 0) + Math.max(1, Number(item.quantity || 1)),
+      )
+    }
+
+    for (const [menuItemId, requestedQuantity] of groupedRequestedQuantities.entries()) {
+      const menuItem = savedItems.find((candidate) => candidate.id?.trim() === menuItemId)
+      if (!menuItem) {
+        continue
+      }
+
+      const maxSelectableQuantity = getLocalSelectableQuantityForMenuItem(index, menuItem)
+      if (requestedQuantity > maxSelectableQuantity) {
+        if (maxSelectableQuantity <= 0) {
+          return `${menuItem.name} is out of stock right now.`
+        }
+        return `Only ${maxSelectableQuantity} available for ${menuItem.name} right now.`
+      }
+    }
+
+    return ""
+  }
+
   function updateOrderDraftItems(
     index: number,
     transform: (items: RestaurantOrderRecord["items"]) => RestaurantOrderRecord["items"],
@@ -3553,6 +4400,10 @@ export default function App() {
   }
 
   function openMenuItemCustomization(orderIndex: number, menuItem: MenuItemDraft) {
+    if (!ensureDraftCanAddMenuItem(orderIndex, menuItem, 1)) {
+      return
+    }
+
     const groups = groupMenuCustomizations(menuItem.customizations || [])
     const selectedSingleKeys: Record<string, string> = {}
     const selectedToggleKeys: Record<string, boolean> = {}
@@ -3584,6 +4435,10 @@ export default function App() {
   }
 
   function incrementDraftMenuItem(index: number, item: MenuItemDraft) {
+    if (!ensureDraftCanAddMenuItem(index, item, 1)) {
+      return
+    }
+
     updateOrderDraftItems(index, (currentItems) => {
       const normalizedMenuItemId = item.id?.trim() || ""
       const existingIndex = currentItems.findIndex((entry) => matchesDraftOrderItemToMenuItem(entry, item))
@@ -3681,7 +4536,7 @@ export default function App() {
         restaurantId: selectedRestaurant.id,
         orderId: draft.id,
       })
-      await refreshOrders(selectedRestaurant.id)
+      await refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: true })
       showNotification("Removed", "Order removed.", "success")
     } catch (error) {
       showOrderErrorAlert("Remove Failed", error instanceof Error ? error.message : "Failed to remove order.")
@@ -3704,6 +4559,26 @@ export default function App() {
       return null
     }
 
+    const fulfillmentType = normalizeFulfillmentType(draft.fulfillmentType)
+    const paymentCollection = resolvePaymentCollection(fulfillmentType, draft.paymentCollection)
+    const deliveryPostcode = fulfillmentType === "delivery" ? normalizeUkPostcode(draft.deliveryPostcode) : ""
+    const deliveryAddress = fulfillmentType === "delivery" ? draft.deliveryAddress.trim() : ""
+
+    if (fulfillmentType === "delivery" && !deliveryPostcode) {
+      showOrderValidationAlert("Delivery postcode is required for delivery orders.")
+      return null
+    }
+
+    if (fulfillmentType === "delivery" && !looksLikeUkPostcode(deliveryPostcode)) {
+      showOrderValidationAlert("Please enter a valid UK postcode for delivery orders.")
+      return null
+    }
+
+    if (fulfillmentType === "delivery" && !deliveryAddress) {
+      showOrderValidationAlert("Select or enter the delivery address before saving the order.")
+      return null
+    }
+
     const parsedItems = parseOrderItemsFromText(draft.itemsText)
     const { items, changed } = resolveOrderItemsMenuItemIds(parsedItems, savedItems)
 
@@ -3713,6 +4588,12 @@ export default function App() {
       })
     }
 
+    const localStockValidationMessage = validateDraftItemsAgainstLocalStock(index, items)
+    if (localStockValidationMessage) {
+      showOrderValidationAlert(localStockValidationMessage)
+      return null
+    }
+
     if (items.length === 0) {
       showOrderValidationAlert("Please add at least one item before saving the order.")
       return null
@@ -3720,17 +4601,22 @@ export default function App() {
 
     setBusy(true)
     try {
+      const shouldTriggerNewOrderExperience = !existingDraft?.id && draft.status === "pending"
       const savedOrderId = await saveRestaurantOrder({
         restaurantId: selectedRestaurant.id,
         orderId: draft.id,
         customerName: draft.customerName.trim(),
         customerPhone: draft.customerPhone.trim(),
+        fulfillmentType,
+        deliveryPostcode: deliveryPostcode || null,
+        deliveryAddress: deliveryAddress || null,
+        paymentCollection,
         status: draft.status,
         notes: draft.notes.trim() || null,
         items,
       })
 
-      await refreshOrders(selectedRestaurant.id)
+      await refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: !shouldTriggerNewOrderExperience })
       if (patch?.status && patch.status !== existingDraft?.status) {
         setOrderFlowNotice(null)
         showNotification(
@@ -3842,6 +4728,10 @@ export default function App() {
       return
     }
 
+    if (!ensureDraftCanAddMenuItem(activeItemCustomization.orderIndex, activeItemCustomization.menuItem, 1)) {
+      return
+    }
+
     const groups = groupMenuCustomizations(activeItemCustomization.menuItem.customizations || [])
     const selectedSummary: string[] = []
     let totalPriceDelta = 0
@@ -3934,9 +4824,15 @@ export default function App() {
 
     const selectedItems = parseOrderItemsFromText(draft.itemsText)
     const normalizedQuery = orderItemPickerSearch.trim().toLowerCase()
-    const availableMenuItems = savedItems.filter(
-      (item) => item.name.trim().length > 0 && Math.max(0, Number(item.stockQuantity || 0)) > 0,
-    )
+    const availableMenuItems = savedItems.filter((item) => {
+      if (item.name.trim().length === 0) {
+        return false
+      }
+
+      const selectedQuantity = getSelectedMenuItemQuantity(selectedItems, item)
+      const maxSelectableQuantity = getLocalSelectableQuantityForMenuItem(activeOrderItemPicker.index, item)
+      return maxSelectableQuantity > 0 || selectedQuantity > 0
+    })
     const filteredMenuItems = normalizedQuery
       ? availableMenuItems.filter((item) => {
           const name = item.name.trim().toLowerCase()
@@ -4006,6 +4902,9 @@ export default function App() {
                     (sum, selected) => sum + Math.max(1, Number(selected.quantity || 1)),
                     0,
                   )
+                  const maxSelectableQuantity = getLocalSelectableQuantityForMenuItem(activeOrderItemPicker.index, item)
+                  const remainingQuantity = Math.max(0, maxSelectableQuantity - selectedVariantCount)
+                  const canAddMore = remainingQuantity > 0
                   const customizationGroups = groupMenuCustomizations(item.customizations || [])
                   const customizationSummary = customizationGroups.map((group) => group.label).join(" • ")
 
@@ -4023,6 +4922,14 @@ export default function App() {
                       <View style={[styles.orderItemPickerRowText, useOrderItemGrid ? styles.orderItemPickerRowTextGrid : null]}>
                         <Text style={styles.orderItemPickerRowTitle}>{item.name}</Text>
                         {item.category ? <Text style={styles.orderItemPickerRowMeta}>{item.category}</Text> : null}
+                        <Text
+                          style={[
+                            styles.orderItemPickerStockMeta,
+                            !canAddMore ? styles.orderItemPickerStockMetaWarning : null,
+                          ]}
+                        >
+                          {canAddMore ? `${remainingQuantity} left` : "Stock full"}
+                        </Text>
                         {hasCustomizations ? (
                           <Text style={styles.orderItemPickerCustomizationMeta} numberOfLines={2}>
                             {customizationSummary}
@@ -4042,18 +4949,24 @@ export default function App() {
                           </Pressable>
                           <Text style={styles.orderItemPickerQtyValue}>{selectedVariantCount}</Text>
                           <Pressable
-                            style={[styles.orderItemPickerQtyButton, styles.orderItemPickerQtyButtonAccent]}
+                            style={[
+                              styles.orderItemPickerQtyButton,
+                              styles.orderItemPickerQtyButtonAccent,
+                              !canAddMore ? styles.orderItemPickerControlDisabled : null,
+                            ]}
                             onPress={() => openMenuItemCustomization(activeOrderItemPicker.index, item)}
+                            disabled={!canAddMore}
                           >
                             <Text style={styles.orderItemPickerQtyButtonText}>+</Text>
                           </Pressable>
                         </View>
                       ) : hasCustomizations ? (
                         <Pressable
-                          style={styles.orderItemPickerAddButton}
+                          style={[styles.orderItemPickerAddButton, !canAddMore ? styles.orderItemPickerControlDisabled : null]}
                           onPress={() => openMenuItemCustomization(activeOrderItemPicker.index, item)}
+                          disabled={!canAddMore}
                         >
-                          <Text style={styles.orderItemPickerAddButtonText}>Add</Text>
+                          <Text style={styles.orderItemPickerAddButtonText}>{canAddMore ? "Add" : "Full"}</Text>
                         </Pressable>
                       ) : selectedVariantCount > 0 ? (
                         <View style={[styles.orderItemPickerQuantityRow, useOrderItemGrid ? styles.orderItemPickerQuantityRowGrid : null]}>
@@ -4065,18 +4978,24 @@ export default function App() {
                           </Pressable>
                           <Text style={styles.orderItemPickerQtyValue}>{selectedVariantCount}</Text>
                           <Pressable
-                            style={[styles.orderItemPickerQtyButton, styles.orderItemPickerQtyButtonAccent]}
+                            style={[
+                              styles.orderItemPickerQtyButton,
+                              styles.orderItemPickerQtyButtonAccent,
+                              !canAddMore ? styles.orderItemPickerControlDisabled : null,
+                            ]}
                             onPress={() => incrementDraftMenuItem(activeOrderItemPicker.index, item)}
+                            disabled={!canAddMore}
                           >
                             <Text style={styles.orderItemPickerQtyButtonText}>+</Text>
                           </Pressable>
                         </View>
                       ) : (
                         <Pressable
-                          style={styles.orderItemPickerAddButton}
+                          style={[styles.orderItemPickerAddButton, !canAddMore ? styles.orderItemPickerControlDisabled : null]}
                           onPress={() => incrementDraftMenuItem(activeOrderItemPicker.index, item)}
+                          disabled={!canAddMore}
                         >
-                          <Text style={styles.orderItemPickerAddButtonText}>Add</Text>
+                          <Text style={styles.orderItemPickerAddButtonText}>{canAddMore ? "Add" : "Full"}</Text>
                         </Pressable>
                       )}
                       </View>
@@ -4202,6 +5121,16 @@ export default function App() {
       (sum, item) => sum + Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0),
       0,
     )
+    const editorFulfillmentType = normalizeFulfillmentType(editorDraft.fulfillmentType)
+    const editorPaymentCollection = resolvePaymentCollection(editorFulfillmentType, editorDraft.paymentCollection)
+    const editorPaymentStatus = normalizePaymentStatus(editorDraft.paymentStatus)
+    const editorPaymentMethod = normalizePaymentMethod(editorDraft.paymentMethod)
+    const editorPaymentDisplayLabel = getOrderPaymentDisplayLabel({
+      fulfillmentType: editorFulfillmentType,
+      paymentCollection: editorPaymentCollection,
+      paymentStatus: editorPaymentStatus,
+      paymentMethod: editorPaymentMethod,
+    })
     const editorOrderReference = formatShortOrderCode(editorDraft.shortOrderCode) || editorDraft.id || `${activeOrderEditor.index + 1}`
     const isAddingOrder = activeOrderEditor.mode === "add"
 
@@ -4262,6 +5191,88 @@ export default function App() {
                   />
                 </View>
               </View>
+
+              <Text style={editModalStyles.sectionLabel}>Fulfilment</Text>
+              <View style={editModalStyles.statusRow}>
+                {[
+                  { label: "Pickup", value: "pickup" as const },
+                  { label: "Delivery", value: "delivery" as const },
+                ].map((option) => {
+                  const isActive = editorFulfillmentType === option.value
+                  return (
+                    <Pressable
+                      key={option.value}
+                      style={[editModalStyles.statusButton, isActive ? editModalStyles.statusButtonActive : null]}
+                      onPress={() =>
+                        updateOrderDraft(activeOrderEditor.index, {
+                          fulfillmentType: option.value,
+                          paymentCollection: option.value === "delivery" ? "cod" : "unpaid",
+                          deliveryPostcode: option.value === "delivery" ? editorDraft.deliveryPostcode : "",
+                          deliveryAddress: option.value === "delivery" ? editorDraft.deliveryAddress : "",
+                        })
+                      }
+                    >
+                      <Text style={[editModalStyles.statusButtonText, isActive ? editModalStyles.statusButtonTextActive : null]}>
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  )
+                })}
+              </View>
+
+              <View style={editModalStyles.fulfillmentSummaryCard}>
+                <Text style={editModalStyles.fieldLabel}>Payment Collection</Text>
+                <View style={editModalStyles.fulfillmentSummaryBadge}>
+                  <Text style={editModalStyles.fulfillmentSummaryBadgeText}>
+                    {editorPaymentDisplayLabel}
+                  </Text>
+                </View>
+              </View>
+
+              {editorFulfillmentType === "delivery" ? (
+                <>
+                  <View style={editModalStyles.deliveryGuidanceCard}>
+                    <Text style={editModalStyles.deliveryGuidanceTitle}>Delivery orders</Text>
+                    <Text style={editModalStyles.deliveryGuidanceText}>
+                      Enter the UK postcode first, then store the exact delivery address selected for the customer.
+                    </Text>
+                  </View>
+
+                  <View style={[editModalStyles.row, isCompactViewport ? editModalStyles.rowStacked : null]}>
+                    <View style={[editModalStyles.fieldColumn, isCompactViewport ? null : editModalStyles.fieldColumnLeft]}>
+                      <Text style={editModalStyles.fieldLabel}>Delivery Postcode</Text>
+                      <TextInput
+                        style={editModalStyles.textInput}
+                        value={editorDraft.deliveryPostcode}
+                        onChangeText={(value) =>
+                          updateOrderDraft(activeOrderEditor.index, { deliveryPostcode: normalizeUkPostcode(value) })
+                        }
+                        placeholder="SW1A 1AA"
+                        autoCapitalize="characters"
+                        placeholderTextColor={COLORS.TEXT_MUTED}
+                      />
+                    </View>
+                    <View style={[editModalStyles.fieldColumn, isCompactViewport ? null : editModalStyles.fieldColumnRight]}>
+                      <Text style={editModalStyles.fieldLabel}>Payment</Text>
+                      <View style={editModalStyles.deliveryReadOnlyField}>
+                        <Text style={editModalStyles.deliveryReadOnlyFieldText}>COD</Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  <Text style={editModalStyles.fieldLabel}>Delivery Address</Text>
+                  <TextInput
+                    style={[editModalStyles.textInput, editModalStyles.notesInput]}
+                    value={editorDraft.deliveryAddress}
+                    onChangeText={(value) => updateOrderDraft(activeOrderEditor.index, { deliveryAddress: value })}
+                    placeholder="Chosen address under the postcode lookup"
+                    placeholderTextColor={COLORS.TEXT_MUTED}
+                    multiline
+                    numberOfLines={3}
+                    textAlignVertical="top"
+                  />
+                </>
+              ) : null}
 
               <Text style={editModalStyles.sectionLabel}>Status</Text>
               <View style={editModalStyles.statusRow}>
@@ -4356,8 +5367,503 @@ export default function App() {
     )
   }
 
+  function renderPaymentUpdateModal() {
+    if (!activePaymentUpdate) {
+      return null
+    }
+
+    const draft = orderDrafts[activePaymentUpdate.index]
+    if (!draft) {
+      return null
+    }
+
+    const fulfillmentType = normalizeFulfillmentType(draft.fulfillmentType)
+    const paymentCollection = resolvePaymentCollection(fulfillmentType, draft.paymentCollection)
+    const paymentStatus = normalizePaymentStatus(draft.paymentStatus)
+    const paymentMethod = normalizePaymentMethod(draft.paymentMethod)
+    const displayLabel = getOrderPaymentDisplayLabel({
+      fulfillmentType,
+      paymentCollection,
+      paymentStatus,
+      paymentMethod,
+    })
+    const canResetToUnpaid = paymentStatus === "paid"
+
+    return (
+      <Modal
+        visible
+        transparent
+        animationType="fade"
+        onRequestClose={closePaymentUpdateModal}
+        statusBarTranslucent={false}
+      >
+        <View style={styles.paymentModalOverlay}>
+          <Pressable style={styles.paymentModalBackdrop} onPress={closePaymentUpdateModal} />
+          <View style={styles.paymentModalCard}>
+            <Text style={styles.paymentModalTitle}>Update Payment</Text>
+            <Text style={styles.paymentModalSubtitle}>
+              {draft.customerName.trim() || "Guest"} · #{formatShortOrderCode(draft.shortOrderCode) || draft.id || activePaymentUpdate.index + 1}
+            </Text>
+
+            <View style={styles.paymentModalCurrentBadgeRow}>
+              <View style={[styles.orderMetaBadge, styles.orderMetaBadgePayment]}>
+                <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextPayment]}>{displayLabel}</Text>
+              </View>
+              {fulfillmentType === "delivery" ? (
+                <View style={[styles.orderMetaBadge, styles.orderMetaBadgeDelivery]}>
+                  <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextDelivery]}>DELIVERY</Text>
+                </View>
+              ) : null}
+            </View>
+
+            <Text style={styles.paymentModalFieldLabel}>Waiter PIN</Text>
+            <TextInput
+              style={styles.paymentModalInput}
+              value={activePaymentUpdate.pin}
+              onChangeText={(value) =>
+                setActivePaymentUpdate((current) => (current ? { ...current, pin: value.replace(/[^\d]/g, "") } : current))
+              }
+              placeholder="Enter PIN"
+              placeholderTextColor={COLORS.TEXT_MUTED}
+              keyboardType="number-pad"
+              secureTextEntry
+              editable={!busy}
+            />
+
+            <Text style={styles.paymentModalFieldLabel}>Mark As</Text>
+            <View style={styles.paymentMethodRow}>
+              {([
+                { label: "Cash", value: "cash" as const },
+                { label: "Card", value: "card" as const },
+              ]).map((option) => {
+                const isActive = activePaymentUpdate.paymentMethod === option.value
+                return (
+                  <Pressable
+                    key={option.value}
+                    style={[styles.paymentMethodButton, isActive ? styles.paymentMethodButtonActive : null]}
+                    onPress={() =>
+                      setActivePaymentUpdate((current) =>
+                        current
+                          ? {
+                              ...current,
+                              paymentMethod: option.value,
+                              cardTransactionId: option.value === "card" ? current.cardTransactionId : "",
+                            }
+                          : current,
+                      )
+                    }
+                    disabled={busy}
+                  >
+                    <Text style={[styles.paymentMethodButtonText, isActive ? styles.paymentMethodButtonTextActive : null]}>
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                )
+              })}
+            </View>
+
+            {activePaymentUpdate.paymentMethod === "card" ? (
+              <>
+                <Text style={styles.paymentModalFieldLabel}>Card Transaction ID</Text>
+                <TextInput
+                  style={styles.paymentModalInput}
+                  value={activePaymentUpdate.cardTransactionId}
+                  onChangeText={(value) =>
+                    setActivePaymentUpdate((current) => (current ? { ...current, cardTransactionId: value } : current))
+                  }
+                  placeholder="Optional transaction reference"
+                  placeholderTextColor={COLORS.TEXT_MUTED}
+                  autoCapitalize="characters"
+                  editable={!busy}
+                />
+              </>
+            ) : null}
+
+            <View style={styles.paymentModalActionStack}>
+              <Pressable
+                style={[styles.paymentModalPrimaryButton, busy ? styles.authSubmitButtonDisabled : null]}
+                onPress={handleConfirmPaidOrder}
+                disabled={busy}
+              >
+                {busy ? (
+                  <ActivityIndicator color={COLORS.SURFACE} size="small" />
+                ) : (
+                  <Text style={styles.paymentModalPrimaryButtonText}>
+                    Mark {activePaymentUpdate.paymentMethod === "card" ? "Card Paid" : "Cash Paid"}
+                  </Text>
+                )}
+              </Pressable>
+
+              {canResetToUnpaid ? (
+                <Pressable
+                  style={[styles.paymentModalSecondaryButton, busy ? styles.authSubmitButtonDisabled : null]}
+                  onPress={handleResetOrderToUnpaid}
+                  disabled={busy}
+                >
+                  <Text style={styles.paymentModalSecondaryButtonText}>Move Back To Unpaid</Text>
+                </Pressable>
+              ) : null}
+
+              <Pressable style={styles.paymentModalCancelButton} onPress={closePaymentUpdateModal} disabled={busy}>
+                <Text style={styles.paymentModalCancelButtonText}>Cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    )
+  }
+
   function getReceiptRestaurantName() {
     return selectedRestaurant?.name?.trim() || restaurantName.trim() || "Restaurant"
+  }
+
+  function getPreferredPrinterDisplayName() {
+    return printPreferences.selectedPrinterName.trim() || "No printer selected"
+  }
+
+  function getSelectedPrinterUrl() {
+    return printPreferences.selectedPrinterUrl?.trim() || null
+  }
+
+  function hasSelectedPrinterTarget() {
+    return printPreferences.selectedPrinterId.trim().length > 0
+  }
+
+  function handleSelectPrinterOption(option: PrinterOption) {
+    setPrintPreferences((current) => ({
+      ...current,
+      selectedPrinterId: option.id,
+      selectedPrinterName: option.name,
+      selectedPrinterUrl: option.printerUrl,
+    }))
+    setIsPrinterDropdownOpen(false)
+  }
+
+  async function handleChoosePrinterFromDevice() {
+    if (Platform.OS !== "ios") {
+      showNotification("Not Available", "This device only supports the system print sheet from the app.", "warning")
+      return
+    }
+
+    setBusy(true)
+    try {
+      const selectedPrinter = await Print.selectPrinterAsync()
+      const printerOption: PrinterOption = {
+        id: selectedPrinter.url?.trim() || `ios:${selectedPrinter.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        name: selectedPrinter.name.trim() || "AirPrint printer",
+        printerUrl: selectedPrinter.url?.trim() || null,
+      }
+
+      setAvailablePrinterOptions((current) => mergePrinterOptions(getDefaultPrinterOptions(), current, [printerOption]))
+      setPrintPreferences((current) => ({
+        ...current,
+        selectedPrinterId: printerOption.id,
+        selectedPrinterName: printerOption.name,
+        selectedPrinterUrl: printerOption.printerUrl,
+      }))
+      setIsPrinterDropdownOpen(false)
+      showNotification("Printer Selected", `${printerOption.name} is ready to use.`, "success")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not choose a printer."
+      if (message.toLowerCase().includes("cancel")) {
+        return
+      }
+      showNotification("Printer Lookup Failed", message, "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function buildDaySummarySnapshot(): DaySummarySnapshot {
+    const now = new Date()
+    const todayOrders = orders.filter((order) => isSameLocalCalendarDay(order.created_at, now))
+    let pendingOrders = 0
+    let completedOrders = 0
+    let grossTotal = 0
+    let cashTotal = 0
+    let creditTotal = 0
+    let codOutstandingTotal = 0
+    let unpaidOutstandingTotal = 0
+
+    for (const order of todayOrders) {
+      const totalPrice = Number(order.totalPrice || 0)
+      const fulfillmentType = normalizeFulfillmentType(order.fulfillmentType)
+      const paymentCollection = resolvePaymentCollection(fulfillmentType, order.paymentCollection)
+      const paymentStatus = normalizePaymentStatus(order.paymentStatus)
+      const paymentMethod = normalizePaymentMethod(order.paymentMethod)
+
+      grossTotal += totalPrice
+
+      if (order.status === "closed") {
+        completedOrders += 1
+      } else {
+        pendingOrders += 1
+      }
+
+      if (paymentStatus === "paid" && paymentMethod === "cash") {
+        cashTotal += totalPrice
+        continue
+      }
+
+      if (paymentStatus === "paid" && paymentMethod === "card") {
+        creditTotal += totalPrice
+        continue
+      }
+
+      if (paymentCollection === "cod") {
+        codOutstandingTotal += totalPrice
+      } else {
+        unpaidOutstandingTotal += totalPrice
+      }
+    }
+
+    return {
+      reportDateLabel: now.toLocaleDateString("en-GB", {
+        weekday: "short",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }),
+      printedAtLabel: now.toLocaleString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      totalOrders: todayOrders.length,
+      pendingOrders,
+      completedOrders,
+      grossTotal,
+      cashTotal,
+      creditTotal,
+      codOutstandingTotal,
+      unpaidOutstandingTotal,
+    }
+  }
+
+  async function handleSavePrintPreferences() {
+    if (!selectedRestaurant) {
+      return
+    }
+
+    const hasPrinterTarget = hasSelectedPrinterTarget()
+    const nextPreferences: PrintPreferencesState = {
+      autoPrintEnabled: hasPrinterTarget ? Boolean(printPreferences.autoPrintEnabled) : false,
+      selectedPrinterId: hasPrinterTarget ? printPreferences.selectedPrinterId.trim() : "",
+      selectedPrinterName: hasPrinterTarget ? printPreferences.selectedPrinterName.trim() : "",
+      selectedPrinterUrl: hasPrinterTarget ? printPreferences.selectedPrinterUrl?.trim() || null : null,
+    }
+
+    setBusy(true)
+    try {
+      await saveStoredPrintPreferences(selectedRestaurant.id, nextPreferences)
+      setPrintPreferences(nextPreferences)
+      showNotification(
+        "Saved",
+        nextPreferences.selectedPrinterName
+          ? `Print settings saved for ${nextPreferences.selectedPrinterName}.`
+          : "Print settings saved.",
+        "success",
+      )
+    } catch (error) {
+      showNotification("Save Failed", error instanceof Error ? error.message : "Could not save print settings.", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleAutoPrintOrders(ordersToPrint: UiOrderDraft[]) {
+    if (ordersToPrint.length === 0) {
+      return
+    }
+
+    const html =
+      ordersToPrint.length === 1
+        ? generateReceiptHTMLUtil(buildReceiptOrder(ordersToPrint[0]), getReceiptRestaurantName())
+        : generateCombinedReceiptHTMLUtil(ordersToPrint.map(buildReceiptOrder), getReceiptRestaurantName())
+
+    await printReceiptHtml(html, getSelectedPrinterUrl())
+  }
+
+  async function handleIncomingOrders(newOrders: RestaurantOrderRecord[]) {
+    if (newOrders.length === 0) {
+      return
+    }
+
+    const newOrderDrafts = newOrders.map(orderToUiDraft)
+    const newOrderCount = newOrderDrafts.length
+    const printerLabel = printPreferences.selectedPrinterName.trim()
+    const title = newOrderCount === 1 ? "New Order" : "New Orders"
+    const messageBase =
+      newOrderCount === 1
+        ? `${newOrderDrafts[0]?.customerName?.trim() || "Guest"} placed a new order.`
+        : `${newOrderCount} new orders have come in.`
+    const message = printPreferences.autoPrintEnabled
+      ? `${messageBase} ${printerLabel ? `Opening the print sheet for ${printerLabel}.` : "Opening the print sheet now."}`
+      : messageBase
+
+    queueNewOrderAlert(newOrderCount)
+    showNotification(title, message, "info")
+
+    if (!printPreferences.autoPrintEnabled) {
+      return
+    }
+
+    try {
+      await handleAutoPrintOrders(newOrderDrafts)
+    } catch (error) {
+      showNotification(
+        "Auto Print Failed",
+        error instanceof Error ? error.message : "Could not open the print sheet for the new order.",
+        "warning",
+      )
+    }
+  }
+
+  function renderPrintCenterModal() {
+    if (!isPrintCenterVisible || !selectedRestaurant || appMode !== "admin") {
+      return null
+    }
+
+    const canChooseNativePrinter = Platform.OS === "ios"
+    const canEnableAutoPrint = hasSelectedPrinterTarget()
+    const printCenterMaxHeight = Math.max(360, viewportHeight - 40)
+
+    return (
+      <Modal
+        visible
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setIsPrinterDropdownOpen(false)
+          setIsPrintCenterVisible(false)
+        }}
+        statusBarTranslucent={false}
+      >
+        <View style={styles.paymentModalOverlay}>
+          <Pressable
+            style={styles.paymentModalBackdrop}
+            onPress={() => {
+              setIsPrinterDropdownOpen(false)
+              setIsPrintCenterVisible(false)
+            }}
+          />
+          <View style={[styles.paymentModalCard, styles.printCenterCard, { maxHeight: printCenterMaxHeight }]}>
+            <ScrollView
+              style={styles.printCenterScroll}
+              contentContainerStyle={styles.printCenterScrollContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              <Text style={styles.paymentModalTitle}>Printer Settings</Text>
+              <Text style={styles.paymentModalSubtitle}>
+                {getReceiptRestaurantName()} {"\u00B7"} {getPreferredPrinterDisplayName()}
+              </Text>
+
+              <Text style={styles.paymentModalFieldLabel}>Available Printers</Text>
+              <Pressable
+                style={[styles.paymentModalInput, styles.printerDropdownField, busy ? styles.authSubmitButtonDisabled : null]}
+                onPress={() => {
+                  if (availablePrinterOptions.length === 0 || busy) {
+                    return
+                  }
+                  setIsPrinterDropdownOpen((current) => !current)
+                }}
+                disabled={availablePrinterOptions.length === 0 || busy}
+              >
+                <Text
+                  style={[
+                    styles.printerDropdownFieldText,
+                    !printPreferences.selectedPrinterName.trim() ? styles.printerDropdownFieldPlaceholder : null,
+                  ]}
+                >
+                  {printPreferences.selectedPrinterName.trim() || "Choose printer"}
+                </Text>
+                <Text style={styles.printerDropdownChevron}>{isPrinterDropdownOpen ? "▲" : "▼"}</Text>
+              </Pressable>
+
+              {isPrinterDropdownOpen ? (
+                <View style={styles.printerDropdownMenu}>
+                  {availablePrinterOptions.map((option) => {
+                    const isActive = printPreferences.selectedPrinterId.trim() === option.id
+                    return (
+                      <Pressable
+                        key={option.id}
+                        style={[styles.printerDropdownItem, isActive ? styles.printerDropdownItemActive : null]}
+                        onPress={() => handleSelectPrinterOption(option)}
+                      >
+                        <Text style={[styles.printerDropdownItemText, isActive ? styles.printerDropdownItemTextActive : null]}>
+                          {option.name}
+                        </Text>
+                      </Pressable>
+                    )
+                  })}
+                </View>
+              ) : null}
+
+              {canChooseNativePrinter ? (
+                <Pressable style={styles.paymentModalSecondaryButton} onPress={handleChoosePrinterFromDevice} disabled={busy}>
+                  <Text style={styles.paymentModalSecondaryButtonText}>Find Printer On This Device</Text>
+                </Pressable>
+              ) : null}
+
+              <Text style={styles.paymentModalFieldLabel}>Auto Print New Orders</Text>
+              <View style={styles.printToggleRow}>
+                <View style={styles.printToggleTextWrap}>
+                  <Text style={styles.printToggleTitle}>{printPreferences.autoPrintEnabled ? "Auto print is on" : "Auto print is off"}</Text>
+                  <Text style={styles.printToggleHelperText}>
+                    {canEnableAutoPrint
+                      ? "New orders will open the print request automatically using the selected printer target."
+                      : "Select a printer target first. The toggle stays off until a printer is chosen."}
+                  </Text>
+                </View>
+                <Switch
+                  value={Boolean(printPreferences.autoPrintEnabled) && canEnableAutoPrint}
+                  onValueChange={(value) => setPrintPreferences((current) => ({ ...current, autoPrintEnabled: value }))}
+                  disabled={!canEnableAutoPrint || busy}
+                  trackColor={{ false: COLORS.BORDER, true: COLORS.ACCENT_LIGHT }}
+                  thumbColor={Boolean(printPreferences.autoPrintEnabled) && canEnableAutoPrint ? COLORS.ACCENT : COLORS.SURFACE}
+                />
+              </View>
+
+              <Text style={styles.printCenterHelperText}>
+                Open any receipt preview if you want to print just one bill manually. Auto print uses the selected printer target
+                whenever the device supports it.
+              </Text>
+              <Text style={styles.printCenterHelperText}>
+                Browser and Android builds still rely on the device's own print sheet, so they cannot list every connected printer
+                directly from the app.
+              </Text>
+
+              <View style={styles.paymentModalActionStack}>
+                <Pressable
+                  style={[styles.paymentModalPrimaryButton, busy ? styles.authSubmitButtonDisabled : null]}
+                  onPress={handleSavePrintPreferences}
+                  disabled={busy}
+                >
+                  <Text style={styles.paymentModalPrimaryButtonText}>Save Print Settings</Text>
+                </Pressable>
+                <Pressable style={styles.paymentModalSecondaryButton} onPress={handlePrintAllPending} disabled={busy}>
+                  <Text style={styles.paymentModalSecondaryButtonText}>Print Pending Receipts</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.paymentModalCancelButton}
+                  onPress={() => {
+                    setIsPrinterDropdownOpen(false)
+                    setIsPrintCenterVisible(false)
+                  }}
+                  disabled={busy}
+                >
+                  <Text style={styles.paymentModalCancelButtonText}>Close</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+    )
   }
 
   function buildReceiptOrder(order: UiOrderDraft): ReceiptOrder {
@@ -4372,14 +5878,25 @@ export default function App() {
       }
     })
     const totalPrice = items.reduce((sum, item) => sum + Number(item.price || 0), 0)
+    const fulfillmentType = normalizeFulfillmentType(order.fulfillmentType)
+    const paymentCollection = resolvePaymentCollection(fulfillmentType, order.paymentCollection)
+    const paymentStatus = normalizePaymentStatus(order.paymentStatus)
+    const paymentMethod = normalizePaymentMethod(order.paymentMethod)
 
     return {
       id: order.id,
       short_code: formatShortOrderCode(order.shortOrderCode) || order.id || "",
       status: getOrderStatusLabel(order.status),
       created_at: order.createdAt || new Date().toISOString(),
+      fulfillment_type: fulfillmentType,
+      payment_collection: paymentCollection,
+      payment_status: paymentStatus,
+      payment_method: paymentMethod,
       customer_name: order.customerName.trim() || "Voice Caller",
       customer_phone: order.customerPhone.trim() || null,
+      delivery_postcode: fulfillmentType === "delivery" ? normalizeUkPostcode(order.deliveryPostcode) : null,
+      delivery_address: fulfillmentType === "delivery" ? order.deliveryAddress.trim() || null : null,
+      card_transaction_id: paymentStatus === "paid" && paymentMethod === "card" ? order.cardTransactionId.trim() || null : null,
       notes: order.notes.trim() || null,
       items,
       total_amount: totalPrice,
@@ -4391,7 +5908,7 @@ export default function App() {
     try {
       const receiptOrder = buildReceiptOrder(order)
       const html = generateReceiptHTMLUtil(receiptOrder, getReceiptRestaurantName())
-      await printReceiptHtml(html)
+      await printReceiptHtml(html, getSelectedPrinterUrl())
     } catch (error) {
       Alert.alert("Print Error", "Could not print receipt. Please try again.")
       console.error("Print error:", error)
@@ -4414,7 +5931,7 @@ export default function App() {
               pendingOrders.map(buildReceiptOrder),
               getReceiptRestaurantName(),
             )
-            await printReceiptHtml(combinedHTML)
+            await printReceiptHtml(combinedHTML, getSelectedPrinterUrl())
           } catch (error) {
             Alert.alert("Print Error", "Could not print the pending receipts. Please try again.")
             console.error("Print all error:", error)
@@ -4596,15 +6113,36 @@ export default function App() {
   }
 
   function renderPosOrdersHeaderCard() {
+    const preferredPrinterLabel = printPreferences.selectedPrinterName.trim()
+    const printStatusLabel = printPreferences.autoPrintEnabled
+      ? preferredPrinterLabel
+        ? `Auto print on · ${preferredPrinterLabel}`
+        : "Auto print on · system print sheet"
+      : "Use Day Summary for totals. Receipt preview stays on each order."
+    void printStatusLabel
+    const resolvedPrintStatusLabel = printPreferences.autoPrintEnabled
+      ? preferredPrinterLabel
+        ? `Auto print on - ${preferredPrinterLabel}`
+        : "Auto print on - system print sheet"
+      : "Use Day Summary for totals. Receipt preview stays on each order."
+
     return (
       <View style={[styles.posOrdersHeaderCard, isTabletLandscape ? styles.posOrdersHeaderCardLandscape : null]}>
         <View style={styles.posOrdersHeaderTopRow}>
           <View style={styles.posOrdersHeadingRow}>
-            <Text style={styles.posOrdersTitle}>Orders</Text>
+            <View style={styles.posOrdersHeadingTextWrap}>
+              <Text style={styles.posOrdersTitle}>Orders</Text>
+              <Text style={styles.posOrdersSubtitle}>{resolvedPrintStatusLabel}</Text>
+            </View>
           </View>
-          <Pressable style={styles.posHeaderRefreshButton} onPress={handleRefreshOrders} disabled={busy}>
-            <Text style={styles.posHeaderRefreshButtonText}>{"\u21BB"}</Text>
-          </Pressable>
+          <View style={styles.posOrdersHeaderActionRow}>
+            <Pressable style={styles.posPrintCenterButton} onPress={() => setActiveTab("summary")} disabled={busy}>
+              <Text style={styles.posPrintCenterButtonText}>Day Summary</Text>
+            </Pressable>
+            <Pressable style={styles.posHeaderRefreshButton} onPress={handleRefreshOrders} disabled={busy}>
+              <Text style={styles.posHeaderRefreshButtonText}>{"\u21BB"}</Text>
+            </Pressable>
+          </View>
         </View>
       </View>
     )
@@ -4646,6 +6184,18 @@ export default function App() {
     const isVoiceOrder = hasCallReviewContent(order.callReview)
     const customerName = order.customerName.trim() || "Voice Caller"
     const customerPhone = order.customerPhone.trim()
+    const fulfillmentType = normalizeFulfillmentType(order.fulfillmentType)
+    const paymentCollection = resolvePaymentCollection(fulfillmentType, order.paymentCollection)
+    const paymentStatus = normalizePaymentStatus(order.paymentStatus)
+    const paymentMethod = normalizePaymentMethod(order.paymentMethod)
+    const deliveryAddress = order.deliveryAddress.trim()
+    const deliveryPostcode = normalizeUkPostcode(order.deliveryPostcode)
+    const paymentDisplayLabel = getOrderPaymentDisplayLabel({
+      fulfillmentType,
+      paymentCollection,
+      paymentStatus,
+      paymentMethod,
+    })
     const totalPrice = draftItemsPreview.reduce(
       (sum, item) => sum + Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0),
       0,
@@ -4686,7 +6236,7 @@ export default function App() {
         onPress={() => setPreviewOrder(order)}
         accessibilityLabel="Bill preview"
       >
-        <Text style={[styles.posOrderActionButtonText, styles.posOrderActionButtonTextOutline]}>Bill Preview</Text>
+        <Text style={[styles.posOrderActionButtonText, styles.posOrderActionButtonTextOutline]}>Receipt Preview</Text>
       </Pressable>
     )
     const detailsToggleAction = order.id ? (
@@ -4719,6 +6269,29 @@ export default function App() {
             </Text>
             {customerPhone ? <Text style={styles.posOrderCustomerPhone}>{"\u{1F4DE} "} {customerPhone}</Text> : null}
           </View>
+          <View style={styles.orderMetaBadgeRow}>
+            {fulfillmentType === "delivery" ? (
+              <View style={[styles.orderMetaBadge, styles.orderMetaBadgeDelivery]}>
+                <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextDelivery]}>
+                  {getFulfillmentTypeLabel(fulfillmentType)}
+                </Text>
+              </View>
+            ) : null}
+            <Pressable
+              style={[styles.orderMetaBadge, styles.orderMetaBadgePayment]}
+              onPress={() => openPaymentUpdateModal(index)}
+              disabled={!order.id || busy}
+            >
+              <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextPayment]}>
+                {paymentDisplayLabel}
+              </Text>
+            </Pressable>
+          </View>
+          {fulfillmentType === "delivery" && (deliveryAddress || deliveryPostcode) ? (
+            <Text style={styles.orderDeliveryAddressText} numberOfLines={2}>
+              {deliveryAddress || deliveryPostcode}
+            </Text>
+          ) : null}
           <View style={styles.posOrderDivider} />
 
           <View style={styles.posOrderItemsList}>
@@ -4749,8 +6322,8 @@ export default function App() {
             <View style={styles.posOrderActionRow}>
               {completeAction}
               {callReviewAction}
-              {billPreviewAction}
             </View>
+            <View style={styles.posOrderActionRow}>{billPreviewAction}</View>
             {detailsToggleAction}
           </View>
         </View>
@@ -4777,6 +6350,70 @@ export default function App() {
             {filteredOrderCards.map(({ order, index }) => renderPosOrderCard(order, index))}
           </View>
         )}
+      </View>
+    )
+  }
+
+  function renderPosSummaryTab() {
+    const summary = buildDaySummarySnapshot()
+    const outstandingTotal = summary.codOutstandingTotal + summary.unpaidOutstandingTotal
+
+    return (
+      <View style={[styles.posTabSection, isTabletLandscape ? styles.posTabSectionLandscape : null]}>
+        <View style={[styles.posOrdersHeaderCard, isTabletLandscape ? styles.posOrdersHeaderCardLandscape : null]}>
+          <View style={styles.posOrdersHeaderTopRow}>
+            <View style={styles.posOrdersHeadingRow}>
+              <View style={styles.posOrdersHeadingTextWrap}>
+                <Text style={styles.posOrdersTitle}>Day Summary</Text>
+                <Text style={styles.posOrdersSubtitle}>{summary.reportDateLabel}</Text>
+              </View>
+            </View>
+            <View style={styles.posOrdersHeaderActionRow}>
+              <Pressable style={styles.posPrintCenterButton} onPress={() => setActiveTab("orders")}>
+                <Text style={styles.posPrintCenterButtonText}>Back To Orders</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.posSummaryCard}>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Orders</Text>
+            <Text style={styles.posSummaryValue}>{summary.totalOrders}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Pending</Text>
+            <Text style={styles.posSummaryValue}>{summary.pendingOrders}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Completed</Text>
+            <Text style={styles.posSummaryValue}>{summary.completedOrders}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Gross Sales</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.grossTotal)}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Cash</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.cashTotal)}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Credit</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.creditTotal)}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>COD Outstanding</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.codOutstandingTotal)}</Text>
+          </View>
+          <View style={styles.posSummaryRow}>
+            <Text style={styles.posSummaryLabel}>Unpaid Outstanding</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.unpaidOutstandingTotal)}</Text>
+          </View>
+          <View style={[styles.posSummaryRow, styles.posSummaryRowStrong]}>
+            <Text style={[styles.posSummaryLabel, styles.posSummaryLabelStrong]}>Outstanding Total</Text>
+            <Text style={[styles.posSummaryValue, styles.posSummaryValueStrong]}>{formatCurrencyDisplay(outstandingTotal)}</Text>
+          </View>
+        </View>
       </View>
     )
   }
@@ -4848,6 +6485,10 @@ export default function App() {
   }
 
   function renderPosContent() {
+    if (activeTab === "summary") {
+      return renderPosSummaryTab()
+    }
+
     return renderPosOrdersTab()
   }
 
@@ -4873,6 +6514,9 @@ export default function App() {
         <Text style={styles.settingsHeaderTitle}>{isSettingsHeader ? "Settings" : "Operations Console"}</Text>
         <View style={styles.settingsHeaderActions}>
           {isSettingsHeader ? <Text style={styles.settingsHeaderGear}>{"\u2699\uFE0F"}</Text> : null}
+          <Pressable style={styles.settingsHeaderPrinterButton} onPress={() => setIsPrintCenterVisible(true)}>
+            <Text style={styles.settingsHeaderPrinterButtonText}>Printer</Text>
+          </Pressable>
           <Pressable style={isSettingsHeader ? styles.settingsHeaderLogoutPlain : styles.settingsHeaderLogoutPill} onPress={handleLogout}>
             <Text style={styles.settingsHeaderLogoutText}>Logout</Text>
           </Pressable>
@@ -5123,6 +6767,18 @@ export default function App() {
     const hasDraftCallReview = hasCallReviewContent(order.callReview)
     const customerName = order.customerName.trim() || "Voice Caller"
     const customerPhone = order.customerPhone.trim()
+    const fulfillmentType = normalizeFulfillmentType(order.fulfillmentType)
+    const paymentCollection = resolvePaymentCollection(fulfillmentType, order.paymentCollection)
+    const paymentStatus = normalizePaymentStatus(order.paymentStatus)
+    const paymentMethod = normalizePaymentMethod(order.paymentMethod)
+    const deliveryAddress = order.deliveryAddress.trim()
+    const deliveryPostcode = normalizeUkPostcode(order.deliveryPostcode)
+    const paymentDisplayLabel = getOrderPaymentDisplayLabel({
+      fulfillmentType,
+      paymentCollection,
+      paymentStatus,
+      paymentMethod,
+    })
     const totalPrice = draftItemsPreview.reduce(
       (sum, item) => sum + Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0),
       0,
@@ -5158,6 +6814,29 @@ export default function App() {
           </Text>
           {customerPhone ? <Text style={styles.orderCustomerPhone}> {"\u00B7"} {customerPhone}</Text> : null}
         </Text>
+        <View style={styles.orderMetaBadgeRow}>
+          {fulfillmentType === "delivery" ? (
+            <View style={[styles.orderMetaBadge, styles.orderMetaBadgeDelivery]}>
+              <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextDelivery]}>
+                {getFulfillmentTypeLabel(fulfillmentType)}
+              </Text>
+            </View>
+          ) : null}
+          <Pressable
+            style={[styles.orderMetaBadge, styles.orderMetaBadgePayment]}
+            onPress={() => openPaymentUpdateModal(index)}
+            disabled={!order.id || busy}
+          >
+            <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextPayment]}>
+              {paymentDisplayLabel}
+            </Text>
+          </Pressable>
+        </View>
+        {fulfillmentType === "delivery" && (deliveryAddress || deliveryPostcode) ? (
+          <Text style={styles.orderDeliveryAddressText} numberOfLines={2}>
+            {deliveryAddress || deliveryPostcode}
+          </Text>
+        ) : null}
 
         <View style={styles.orderDivider} />
         {renderCompactOrderLines(draftItemsPreview, {
@@ -5202,23 +6881,6 @@ export default function App() {
               accessibilityLabel="Preview receipt"
             >
               <Text style={styles.orderPreviewButtonText}>{"\u{1F441}\uFE0F"}</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.orderCardActionButton, styles.printButton]}
-              onPress={() => {
-                if (previewLongPressKeyRef.current === orderDraftKey) {
-                  previewLongPressKeyRef.current = null
-                  return
-                }
-                handlePrint(order)
-              }}
-              onLongPress={() => {
-                previewLongPressKeyRef.current = orderDraftKey
-                setPreviewOrder(order)
-              }}
-              accessibilityLabel="Print receipt"
-            >
-              <Text style={styles.printButtonText}>Print</Text>
             </Pressable>
             <Pressable style={[styles.orderCardActionButton, styles.orderDetailsToggle]} onPress={() => openEditOrderModal(index)}>
               <Text style={styles.orderDetailsToggleText}>Edit Details</Text>
@@ -5381,6 +7043,7 @@ export default function App() {
             }}
           />
           {renderItemCustomizationModal()}
+          {renderPaymentUpdateModal()}
           {renderOrderEditorModal()}
           {renderOrderItemPickerModal()}
           {busy ? (
@@ -5770,6 +7433,8 @@ export default function App() {
         }}
       />
       {renderItemCustomizationModal()}
+      {renderPrintCenterModal()}
+      {renderPaymentUpdateModal()}
       {renderOrderEditorModal()}
       {renderOrderItemPickerModal()}
       {busy ? (
@@ -5996,11 +7661,76 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   posOrdersHeadingRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  posOrdersHeadingTextWrap: { gap: 2 },
   posOrdersTitle: {
     color: COLORS.TEXT_PRIMARY,
     fontSize: 22,
     fontWeight: "800",
     fontFamily: FONT_SANS,
+  },
+  posOrdersSubtitle: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: FONT_SANS,
+  },
+  posOrdersHeaderActionRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  posPrintCenterButton: {
+    minHeight: 38,
+    borderRadius: 19,
+    backgroundColor: COLORS.SURFACE,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    paddingHorizontal: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  posPrintCenterButtonText: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 13,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  posSummaryCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  posSummaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  posSummaryRowStrong: {
+    marginTop: 2,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.BORDER,
+  },
+  posSummaryLabel: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 14,
+    fontWeight: "600",
+    fontFamily: FONT_SANS,
+  },
+  posSummaryLabelStrong: {
+    color: COLORS.TEXT_PRIMARY,
+    fontWeight: "800",
+  },
+  posSummaryValue: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 15,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+    textAlign: "right",
+  },
+  posSummaryValueStrong: {
+    color: COLORS.ACCENT,
   },
   posHeaderRefreshButton: {
     width: 38,
@@ -6135,6 +7865,312 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: FONT_SANS,
   },
+  orderMetaBadgeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: -2,
+    marginBottom: 2,
+  },
+  orderMetaBadge: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+  },
+  orderMetaBadgePickup: {
+    backgroundColor: COLORS.ACCENT_LIGHT,
+    borderColor: COLORS.ACCENT,
+  },
+  orderMetaBadgeDelivery: {
+    backgroundColor: COLORS.WARNING_BG,
+    borderColor: COLORS.WARNING,
+  },
+  orderMetaBadgePayment: {
+    backgroundColor: COLORS.SURFACE_RAISED,
+    borderColor: COLORS.BORDER,
+  },
+  orderMetaBadgeText: {
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+    fontFamily: FONT_SANS,
+  },
+  orderMetaBadgeTextPickup: {
+    color: COLORS.ACCENT,
+  },
+  orderMetaBadgeTextDelivery: {
+    color: COLORS.WARNING,
+  },
+  orderMetaBadgeTextPayment: {
+    color: COLORS.TEXT_PRIMARY,
+  },
+  orderDeliveryAddressText: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: FONT_SANS,
+  },
+  paymentModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(4, 11, 21, 0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+  paymentModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  paymentModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    backgroundColor: COLORS.SURFACE,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    gap: 10,
+    ...CARD_SHADOW,
+    elevation: 8,
+  },
+  printCenterCard: {
+    maxWidth: 520,
+  },
+  printCenterScroll: {
+    width: "100%",
+  },
+  printCenterScrollContent: {
+    gap: 10,
+    paddingBottom: 4,
+  },
+  paymentModalTitle: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 20,
+    fontWeight: "800",
+    fontFamily: FONT_SANS,
+  },
+  paymentModalSubtitle: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 13,
+    lineHeight: 18,
+    fontFamily: FONT_SANS,
+  },
+  paymentModalCurrentBadgeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  paymentModalFieldLabel: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginTop: 4,
+    fontFamily: FONT_SANS,
+  },
+  paymentModalInput: {
+    minHeight: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 15,
+    fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
+  },
+  printerDropdownField: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  printerDropdownFieldText: {
+    flex: 1,
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 15,
+    fontFamily: FONT_SANS,
+  },
+  printerDropdownFieldPlaceholder: {
+    color: COLORS.TEXT_MUTED,
+  },
+  printerDropdownChevron: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    fontWeight: "700",
+    marginLeft: 12,
+    fontFamily: FONT_SANS,
+  },
+  printerDropdownMenu: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE,
+    overflow: "hidden",
+  },
+  printerDropdownItem: {
+    minHeight: 44,
+    paddingHorizontal: 14,
+    alignItems: "flex-start",
+    justifyContent: "center",
+    borderTopWidth: 1,
+    borderTopColor: COLORS.BORDER,
+  },
+  printerDropdownItemActive: {
+    backgroundColor: COLORS.ACCENT_LIGHT,
+  },
+  printerDropdownItemText: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 14,
+    fontWeight: "600",
+    fontFamily: FONT_SANS,
+  },
+  printerDropdownItemTextActive: {
+    color: COLORS.ACCENT,
+  },
+  paymentMethodRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  paymentMethodButton: {
+    flex: 1,
+    minHeight: 46,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  paymentMethodButtonActive: {
+    backgroundColor: COLORS.ACCENT,
+    borderColor: COLORS.ACCENT,
+  },
+  paymentMethodButtonText: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  paymentMethodButtonTextActive: {
+    color: COLORS.SURFACE,
+  },
+  printCenterHelperText: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: FONT_SANS,
+  },
+  printToggleRow: {
+    minHeight: 56,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  printToggleTextWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  printToggleTitle: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  printToggleHelperText: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: FONT_SANS,
+  },
+  printCenterSummaryCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  printCenterSummaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  printCenterSummaryLabel: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 13,
+    fontWeight: "600",
+    fontFamily: FONT_SANS,
+  },
+  printCenterSummaryValue: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 13,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+    textAlign: "right",
+  },
+  paymentModalActionStack: {
+    gap: 10,
+    marginTop: 8,
+  },
+  paymentModalPrimaryButton: {
+    minHeight: 48,
+    borderRadius: 12,
+    backgroundColor: COLORS.ACCENT,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  paymentModalPrimaryButtonText: {
+    color: COLORS.SURFACE,
+    fontSize: 15,
+    fontWeight: "800",
+    fontFamily: FONT_SANS,
+  },
+  paymentModalSecondaryButton: {
+    minHeight: 46,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.WARNING,
+    backgroundColor: COLORS.WARNING_BG,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  paymentModalSecondaryButtonText: {
+    color: COLORS.WARNING,
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  paymentModalCancelButton: {
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  paymentModalCancelButtonText: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 14,
+    fontWeight: "600",
+    fontFamily: FONT_SANS,
+  },
   posOrderDivider: {
     height: 1,
     backgroundColor: COLORS.BORDER,
@@ -6224,6 +8260,7 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_PRIMARY,
     fontSize: 15,
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   posOrderNotesInput: {
     minHeight: 78,
@@ -6237,6 +8274,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     textAlignVertical: "top",
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   posOrderStatusToggleRow: { flexDirection: "row", gap: 8 },
   posOrderStatusToggle: {
@@ -6285,6 +8323,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     textAlignVertical: "top",
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   posOrderEditorHint: {
     color: COLORS.TEXT_SECONDARY,
@@ -7534,6 +9573,7 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_PRIMARY,
     fontSize: 14,
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   orderItemPickerScroll: { flexGrow: 0 },
   orderItemPickerList: {
@@ -7615,6 +9655,15 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: FONT_SANS,
   },
+  orderItemPickerStockMeta: {
+    color: COLORS.SUCCESS,
+    fontSize: 11,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  orderItemPickerStockMetaWarning: {
+    color: COLORS.DANGER,
+  },
   orderItemPickerCustomizationMeta: {
     color: COLORS.TEXT_SECONDARY,
     fontSize: 11,
@@ -7669,6 +9718,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
+  },
+  orderItemPickerControlDisabled: {
+    opacity: 0.45,
   },
   orderItemPickerQtyButtonAccent: { backgroundColor: COLORS.ACCENT_TINT },
   orderItemPickerQtyButtonDanger: { backgroundColor: COLORS.DANGER_TINT },
@@ -7772,6 +9824,19 @@ const styles = StyleSheet.create({
   },
   settingsHeaderActions: { minWidth: 110, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 10 },
   settingsHeaderGear: { color: COLORS.HEADER_TEXT, fontSize: 18, fontFamily: FONT_SANS },
+  settingsHeaderPrinterButton: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.28)",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  settingsHeaderPrinterButtonText: {
+    color: COLORS.HEADER_TEXT,
+    fontSize: 13,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
   settingsHeaderLogoutPlain: { paddingVertical: 6 },
   settingsHeaderLogoutPill: {
     backgroundColor: COLORS.ACCENT,
@@ -7938,6 +10003,7 @@ const styles = StyleSheet.create({
     paddingTop: 0,
     paddingBottom: 0,
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   scannerFieldInputMultiline: {
     minHeight: 58,
@@ -8052,6 +10118,7 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
     marginBottom: 14,
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   scannerDraftActionRow: {
     flexDirection: "row",
@@ -8215,6 +10282,7 @@ const styles = StyleSheet.create({
     color: "#1A1A1A",
     backgroundColor: "#FFFFFF",
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   voiceSavedKeyBox: {
     borderWidth: 1,
@@ -8823,6 +10891,72 @@ const editModalStyles = StyleSheet.create({
     minHeight: 90,
     textAlignVertical: "top",
     paddingTop: 12,
+  },
+  fulfillmentSummaryCard: {
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  fulfillmentSummaryBadge: {
+    alignSelf: "flex-start",
+    minHeight: 32,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    justifyContent: "center",
+    backgroundColor: COLORS.ACCENT_LIGHT,
+    borderWidth: 1,
+    borderColor: COLORS.ACCENT,
+  },
+  fulfillmentSummaryBadgeText: {
+    color: COLORS.ACCENT,
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+    fontFamily: FONT_SANS,
+  },
+  deliveryGuidanceCard: {
+    marginTop: 16,
+    marginBottom: 4,
+    borderRadius: 12,
+    backgroundColor: COLORS.WARNING_BG,
+    borderWidth: 1,
+    borderColor: COLORS.WARNING,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 4,
+  },
+  deliveryGuidanceTitle: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  deliveryGuidanceText: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 13,
+    lineHeight: 18,
+    fontFamily: FONT_SANS,
+  },
+  deliveryReadOnlyField: {
+    minHeight: 48,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    paddingHorizontal: 14,
+    alignItems: "flex-start",
+    justifyContent: "center",
+  },
+  deliveryReadOnlyFieldText: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 15,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
   },
   statusRow: {
     flexDirection: "row",

@@ -17,6 +17,15 @@ const EDITABLE_CARD_SHADOW = (Platform.OS === "web"
       elevation: 1,
     }) as Record<string, unknown>
 
+const WEB_TEXT_INPUT_RESET = (Platform.OS === "web"
+  ? {
+      outlineStyle: "none",
+      outlineWidth: 0,
+      outlineColor: "transparent",
+      boxShadow: "none",
+    }
+  : {}) as Record<string, unknown>
+
 type MenuScreenProps = {
   savedItems: MenuItemDraft[]
   editableMenuItems: UiDraftItem[]
@@ -381,6 +390,7 @@ const styles = StyleSheet.create({
     paddingTop: 0,
     paddingBottom: 0,
     fontFamily: FONT_SANS,
+    ...WEB_TEXT_INPUT_RESET,
   },
   fieldInputMultiline: {
     minHeight: 58,

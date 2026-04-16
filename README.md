@@ -83,6 +83,8 @@ Set these Supabase function secrets/env vars:
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `ELEVENLABS_TOOL_SECRET`
+- `GETADDRESS_API_KEY`
+- `ORDER_PAYMENT_PIN`
 - Optional: `MOBILE_ONBOARDING_SUPABASE_FUNCTIONS_BASE_URL` or `SUPABASE_FUNCTIONS_BASE_URL`
 
 ## Menu Scan Note
@@ -116,6 +118,8 @@ Reference schema file:
 - `supabase/003_menu_stock_and_tool_support.sql`
 - `supabase/004_place_voice_order_atomic.sql`
 - `supabase/010_manual_order_stock_atomic.sql`
+- `supabase/013_order_fulfillment_and_delivery_fields.sql`
+- `supabase/014_order_payment_settlement.sql`
 - `supabase/012_voice_agent_link_webhooks.sql`
 
 ## Post-Call Webhook
@@ -140,7 +144,9 @@ These Supabase edge functions are provided for live menu/order calls:
 - `supabase/functions/get-menu-items/index.ts`
 - `supabase/functions/get-item-customizations/index.ts`
 - `supabase/functions/check-item-stock/index.ts`
+- `supabase/functions/lookup-uk-postcode-addresses/index.ts`
 - `supabase/functions/place-order-atomic/index.ts`
+- `supabase/functions/update-order-payment-status/index.ts`
 
 Deploy:
 
@@ -149,7 +155,9 @@ supabase functions deploy create-elevenlabs-agent
 supabase functions deploy get-menu-items
 supabase functions deploy get-item-customizations
 supabase functions deploy check-item-stock
+supabase functions deploy lookup-uk-postcode-addresses
 supabase functions deploy place-order-atomic
+supabase functions deploy update-order-payment-status
 supabase functions deploy elevenlabs-post-call
 ```
 
@@ -157,6 +165,8 @@ Set a shared tool secret (used as `x-tool-secret` header from ElevenLabs tool co
 
 ```bash
 supabase secrets set ELEVENLABS_TOOL_SECRET=your_tool_shared_secret
+supabase secrets set GETADDRESS_API_KEY=your_getaddress_api_key
+supabase secrets set ORDER_PAYMENT_PIN=1234
 ```
 
 Stock support migration required:
@@ -164,4 +174,6 @@ Stock support migration required:
 - `supabase/003_menu_stock_and_tool_support.sql`
 - `supabase/004_place_voice_order_atomic.sql`
 - `supabase/010_manual_order_stock_atomic.sql`
+- `supabase/013_order_fulfillment_and_delivery_fields.sql`
+- `supabase/014_order_payment_settlement.sql`
 - `supabase/012_voice_agent_link_webhooks.sql`

@@ -1,9 +1,29 @@
 import { Platform } from "react-native"
 import * as Print from "expo-print"
 import type { ReceiptOrder } from "../types"
-import { escapeReceiptHtml, formatReceiptDate, getReceiptNumericString } from "./formatters"
+import {
+  escapeReceiptHtml,
+  formatReceiptDate,
+  getFulfillmentTypeLabel,
+  getOrderPaymentDisplayLabel,
+  getReceiptNumericString,
+  normalizeUkPostcode,
+} from "./formatters"
 
 const HTML_CURRENCY_ENTITY = "&pound;"
+
+type DaySummarySnapshot = {
+  reportDateLabel: string
+  printedAtLabel: string
+  totalOrders: number
+  pendingOrders: number
+  completedOrders: number
+  grossTotal: number
+  cashTotal: number
+  creditTotal: number
+  codOutstandingTotal: number
+  unpaidOutstandingTotal: number
+}
 
 function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): string {
   const itemRows = (order.items || order.order_items || [])
@@ -25,6 +45,18 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
   const orderCode = escapeReceiptHtml(String(order.short_code || order.id || ""))
   const customerName = escapeReceiptHtml(String(order.customer_name || order.contact_name || "Guest"))
   const phone = escapeReceiptHtml(String(order.customer_phone || order.contact_phone || "").trim())
+  const fulfillmentType = escapeReceiptHtml(getFulfillmentTypeLabel(order.fulfillment_type))
+  const paymentCollection = escapeReceiptHtml(
+    getOrderPaymentDisplayLabel({
+      fulfillmentType: order.fulfillment_type,
+      paymentCollection: order.payment_collection,
+      paymentStatus: order.payment_status,
+      paymentMethod: order.payment_method,
+    }),
+  )
+  const deliveryPostcode = escapeReceiptHtml(normalizeUkPostcode(order.delivery_postcode || ""))
+  const deliveryAddress = escapeReceiptHtml(String(order.delivery_address || "").trim())
+  const cardTransactionId = escapeReceiptHtml(String(order.card_transaction_id || "").trim())
   const notes = escapeReceiptHtml(String(order.notes || order.special_instructions || "").trim())
   const dateStr = escapeReceiptHtml(formatReceiptDate(order.created_at))
   const status = escapeReceiptHtml(String(order.status || "PENDING").toUpperCase())
@@ -49,7 +81,18 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
       <span>Customer:</span>
       <span class="bold">${customerName}</span>
     </div>
+    <div class="meta-row">
+      <span>Order Type:</span>
+      <span>${fulfillmentType}</span>
+    </div>
+    <div class="meta-row">
+      <span>Payment:</span>
+      <span>${paymentCollection}</span>
+    </div>
     ${phone ? `<div class="meta-row"><span>Phone:</span><span>${phone}</span></div>` : ""}
+    ${deliveryPostcode ? `<div class="meta-row"><span>Postcode:</span><span>${deliveryPostcode}</span></div>` : ""}
+    ${deliveryAddress ? `<div class="meta-row"><span>Address:</span><span>${deliveryAddress}</span></div>` : ""}
+    ${cardTransactionId ? `<div class="meta-row"><span>Card Ref:</span><span>${cardTransactionId}</span></div>` : ""}
     ${notes ? `<div class="meta-row"><span>Notes:</span><span>${notes}</span></div>` : ""}
     <div class="divider">--------------------------------</div>
 
@@ -253,6 +296,68 @@ export function generateCombinedReceiptHTML(
 </html>`
 }
 
+export function generateDaySummaryHTML(
+  summary: DaySummarySnapshot,
+  restaurantName: string,
+  paperWidth: "58mm" | "80mm" = "80mm",
+): string {
+  const safeRestaurantName = escapeReceiptHtml(restaurantName || "Restaurant")
+  const reportDateLabel = escapeReceiptHtml(summary.reportDateLabel)
+  const printedAtLabel = escapeReceiptHtml(summary.printedAtLabel)
+  const outstandingTotal = summary.codOutstandingTotal + summary.unpaidOutstandingTotal
+  const rows = [
+    { label: "Total Orders", value: String(summary.totalOrders) },
+    { label: "Pending", value: String(summary.pendingOrders) },
+    { label: "Completed", value: String(summary.completedOrders) },
+    { label: "Gross Sales", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.grossTotal)}` },
+    { label: "Cash", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.cashTotal)}` },
+    { label: "Credit", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.creditTotal)}` },
+    { label: "COD Outstanding", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.codOutstandingTotal)}` },
+    { label: "Unpaid Outstanding", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.unpaidOutstandingTotal)}` },
+    { label: "Outstanding Total", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(outstandingTotal)}` },
+  ]
+
+  const rowMarkup = rows
+    .map(
+      (row) => `
+        <div class="meta-row">
+          <span>${escapeReceiptHtml(row.label)}</span>
+          <span class="bold">${escapeReceiptHtml(row.value)}</span>
+        </div>
+      `,
+    )
+    .join("")
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Day Summary</title>
+  <style>${getReceiptStyles(paperWidth)}</style>
+</head>
+<body>
+  <div class="restaurant-name">${safeRestaurantName}</div>
+  <div class="tagline">Day Summary</div>
+  <div class="divider divider-solid">================================</div>
+
+  <div class="order-number">${reportDateLabel}</div>
+  <div class="status-row">
+    <span class="status-badge">Printed ${printedAtLabel}</span>
+  </div>
+  <div class="divider">--------------------------------</div>
+
+  ${rowMarkup}
+
+  <div class="divider divider-solid">================================</div>
+  <div class="footer">
+    <div class="thankyou">Cash and Credit Summary</div>
+    <div>Keep with the day-end paperwork</div>
+  </div>
+</body>
+</html>`
+}
+
 export function printHtmlInHiddenIframe(html: string) {
   if (Platform.OS !== "web" || typeof document === "undefined") {
     return
@@ -274,21 +379,37 @@ export function printHtmlInHiddenIframe(html: string) {
     throw new Error("Could not prepare print preview.")
   }
 
+  let didPrint = false
+  let didCleanup = false
+
   doc.open()
   doc.write(html)
   doc.close()
 
   const cleanup = () => {
+    if (didCleanup) {
+      return
+    }
+    didCleanup = true
     try {
       document.body.removeChild(iframe)
     } catch {}
   }
 
+  const printFrame = () => {
+    if (didPrint) {
+      return
+    }
+
+    didPrint = true
+    iframeWindow.focus()
+    iframeWindow.print()
+  }
+
   iframe.onload = () => {
     setTimeout(() => {
       try {
-        iframeWindow.focus()
-        iframeWindow.print()
+        printFrame()
       } finally {
         setTimeout(cleanup, 1000)
       }
@@ -297,17 +418,18 @@ export function printHtmlInHiddenIframe(html: string) {
 
   setTimeout(() => {
     try {
-      iframeWindow.focus()
-      iframeWindow.print()
-    } catch {}
+      printFrame()
+    } catch {
+      cleanup()
+    }
   }, 500)
 }
 
-export async function printReceiptHtml(html: string) {
+export async function printReceiptHtml(html: string, printerUrl?: string | null) {
   if (Platform.OS === "web") {
     printHtmlInHiddenIframe(html)
     return
   }
 
-  await Print.printAsync({ html })
+  await Print.printAsync({ html, printerUrl: printerUrl || undefined })
 }

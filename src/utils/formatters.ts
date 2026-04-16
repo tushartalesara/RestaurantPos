@@ -18,6 +18,56 @@ export function formatAudioTime(value: number | null | undefined): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`
 }
 
+export function normalizeUkPostcode(value: unknown): string {
+  const compact = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "")
+
+  if (!compact) {
+    return ""
+  }
+
+  if (compact.length <= 3) {
+    return compact
+  }
+
+  return `${compact.slice(0, -3)} ${compact.slice(-3)}`
+}
+
+export function getFulfillmentTypeLabel(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase() === "delivery" ? "DELIVERY" : "PICKUP"
+}
+
+export function getPaymentCollectionLabel(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase() === "cod" ? "COD" : "UNPAID"
+}
+
+export function getOrderPaymentDisplayLabel(params: {
+  fulfillmentType?: string | null
+  paymentCollection?: string | null
+  paymentStatus?: string | null
+  paymentMethod?: string | null
+}): string {
+  const fulfillmentType = String(params.fulfillmentType || "").trim().toLowerCase() === "delivery" ? "delivery" : "pickup"
+  const paymentCollection =
+    String(params.paymentCollection || "").trim().toLowerCase() === "cod"
+      ? "cod"
+      : fulfillmentType === "delivery"
+        ? "cod"
+        : "unpaid"
+  const paymentStatus = String(params.paymentStatus || "").trim().toLowerCase() === "paid" ? "paid" : "unpaid"
+  const paymentMethod = String(params.paymentMethod || "").trim().toLowerCase()
+
+  if (paymentStatus === "paid") {
+    if (paymentMethod === "card") return "CARD"
+    if (paymentMethod === "cash") return "CASH"
+  }
+
+  if (paymentCollection === "cod") return "COD"
+  return "UNPAID"
+}
+
 export function getOrderStatusTone(status: string | null | undefined): "pending" | "complete" | "cancelled" {
   const normalized = String(status || "")
     .trim()

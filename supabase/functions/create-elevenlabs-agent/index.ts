@@ -16,6 +16,7 @@ const TOOL_NAMES = {
   getMenuItems: "mobile_onboarding_get_menu_items",
   getItemCustomizations: "mobile_onboarding_get_item_customizations",
   checkItemStock: "mobile_onboarding_check_item_stock",
+  lookupUkPostcodeAddresses: "mobile_onboarding_lookup_uk_postcode_addresses",
   placeOrderAtomic: "mobile_onboarding_place_order_atomic",
 } as const
 
@@ -89,12 +90,19 @@ function buildRestaurantPrompt(params: { agentName: string; address?: string; ph
     `1) ${TOOL_NAMES.getMenuItems}`,
     `2) ${TOOL_NAMES.getItemCustomizations}`,
     `3) ${TOOL_NAMES.checkItemStock}`,
-    `4) ${TOOL_NAMES.placeOrderAtomic}`,
+    `4) ${TOOL_NAMES.lookupUkPostcodeAddresses}`,
+    `5) ${TOOL_NAMES.placeOrderAtomic}`,
     ``,
     `CORE RULES`,
     `- Always pass agent_id as {{system__agent_id}} in tool calls.`,
     `- Always pass conversation_id as {{system__conversation_id}} when available.`,
     `- Collect customer_name and customer_phone before placing an order.`,
+    `- Determine whether the order is pickup or delivery before placing it.`,
+    `- For delivery, ask for the postcode first, then call ${TOOL_NAMES.lookupUkPostcodeAddresses}.`,
+    `- For delivery, read back a short numbered list of returned addresses and let the caller pick one exact address before placing the order.`,
+    `- Never ask the caller to dictate the full delivery address before you have done the postcode lookup.`,
+    `- Pickup orders must be sent as fulfillment_type=pickup and payment_collection=unpaid.`,
+    `- Delivery orders must be sent as fulfillment_type=delivery and payment_collection=cod.`,
     `- Never place an order without explicit customer confirmation.`,
     `- Never claim the order is placed unless ${TOOL_NAMES.placeOrderAtomic} succeeds.`,
     `- Speak naturally and keep replies concise.`,
@@ -103,12 +111,14 @@ function buildRestaurantPrompt(params: { agentName: string; address?: string; ph
     `- Use customizations only for selectable choices returned by tools.`,
     ``,
     `ORDER FLOW`,
-    `- Greet the caller and ask what they would like to order.`,
+    `- Greet the caller, ask whether the order is for pickup or delivery, then ask what they would like to order.`,
     `- If they ask about the menu, call ${TOOL_NAMES.getMenuItems} and summarize categories plus a few examples.`,
     `- For each requested item, call ${TOOL_NAMES.checkItemStock} first.`,
     `- If an exact item is resolved, call ${TOOL_NAMES.getItemCustomizations} before final confirmation.`,
-    `- Summarize the cart, then ask if you should place the order now.`,
-    `- On yes, call ${TOOL_NAMES.placeOrderAtomic} with customer details, notes if any, and the final items.`,
+    `- For delivery, collect the postcode, call ${TOOL_NAMES.lookupUkPostcodeAddresses}, and let the caller choose one returned address.`,
+    `- If the postcode lookup returns no results, ask for a different postcode or offer pickup instead.`,
+    `- Summarize the cart, fulfilment type, payment collection, and delivery address when relevant, then ask if you should place the order now.`,
+    `- On yes, call ${TOOL_NAMES.placeOrderAtomic} with customer details, fulfillment_type, payment_collection, notes if any, and the final items.`,
     `- Share the 3-digit order code and total price after a successful order.`,
   ].join("\n")
 }
@@ -165,7 +175,7 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/get_item_customizations`,
+        url: `${params.functionsBaseUrl}/get-item-customizations`,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
@@ -207,9 +217,32 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
     },
     {
       type: "webhook",
+      name: TOOL_NAMES.lookupUkPostcodeAddresses,
+      description:
+        "Look up delivery addresses for a UK postcode. Always send agent_id and the caller's postcode before asking them to choose one exact address.",
+      response_timeout_secs: 20,
+      disable_interruptions: false,
+      force_pre_tool_speech: false,
+      api_schema: {
+        url: `${params.functionsBaseUrl}/lookup-uk-postcode-addresses`,
+        method: "POST",
+        request_headers: requestHeaders,
+        request_body_schema: {
+          type: "object",
+          required: ["agent_id", "postcode"],
+          properties: {
+            agent_id: { type: "string", description: "Use {{system__agent_id}}." },
+            conversation_id: { type: "string", description: "Use {{system__conversation_id}} when available." },
+            postcode: { type: "string", description: "The UK delivery postcode provided by the caller." },
+          },
+        },
+      },
+    },
+    {
+      type: "webhook",
       name: TOOL_NAMES.placeOrderAtomic,
       description:
-        "Place the final restaurant order transactionally after the caller confirms it. Always send agent_id, conversation_id, customer_name, customer_phone, and items.",
+        "Place the final restaurant order transactionally after the caller confirms it. Always send agent_id, conversation_id, customer_name, customer_phone, fulfillment_type, payment_collection, and items.",
       response_timeout_secs: 20,
       disable_interruptions: false,
       force_pre_tool_speech: false,
@@ -219,12 +252,38 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
-          required: ["agent_id", "conversation_id", "customer_name", "customer_phone", "items"],
+          required: [
+            "agent_id",
+            "conversation_id",
+            "customer_name",
+            "customer_phone",
+            "fulfillment_type",
+            "payment_collection",
+            "items",
+          ],
           properties: {
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}}." },
             customer_name: { type: "string", description: "Customer name for the order." },
             customer_phone: { type: "string", description: "Customer phone number for order tracking." },
+            fulfillment_type: {
+              type: "string",
+              description: "Use pickup for collection orders or delivery for address orders.",
+              enum: ["pickup", "delivery"],
+            },
+            delivery_postcode: {
+              type: "string",
+              description: "Required when fulfillment_type is delivery. Use the selected UK delivery postcode.",
+            },
+            delivery_address: {
+              type: "string",
+              description: "Required when fulfillment_type is delivery. Use the exact address chosen from the postcode lookup results.",
+            },
+            payment_collection: {
+              type: "string",
+              description: "Use unpaid for pickup orders and cod for delivery orders.",
+              enum: ["unpaid", "cod"],
+            },
             status: {
               type: "string",
               description: "Use pending unless there is a special reason to close the order immediately.",

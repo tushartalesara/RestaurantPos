@@ -1,7 +1,15 @@
 import React from "react"
 import { Platform, StyleSheet, Text, View } from "react-native"
 import type { ReceiptOrder } from "../types"
-import { formatCurrencyDisplay, formatReceiptDate, getOrderStatusLabel, getReceiptNumericString } from "./formatters"
+import {
+  formatCurrencyDisplay,
+  formatReceiptDate,
+  getFulfillmentTypeLabel,
+  getOrderPaymentDisplayLabel,
+  getOrderStatusLabel,
+  getReceiptNumericString,
+  normalizeUkPostcode,
+} from "./formatters"
 
 type ReceiptContentProps = {
   order: ReceiptOrder | null
@@ -17,6 +25,16 @@ export function ReceiptContent({ order, restaurantName }: ReceiptContentProps) {
   const total = formatCurrencyDisplay(Number(getReceiptNumericString(order?.total_amount || order?.total || 0)))
   const customerName = String(order?.customer_name || order?.contact_name || "Guest")
   const customerPhone = String(order?.customer_phone || order?.contact_phone || "").trim()
+  const fulfillmentType = getFulfillmentTypeLabel(order?.fulfillment_type)
+  const paymentCollection = getOrderPaymentDisplayLabel({
+    fulfillmentType: order?.fulfillment_type,
+    paymentCollection: order?.payment_collection,
+    paymentStatus: order?.payment_status,
+    paymentMethod: order?.payment_method,
+  })
+  const cardTransactionId = String(order?.card_transaction_id || "").trim()
+  const deliveryPostcode = normalizeUkPostcode(order?.delivery_postcode)
+  const deliveryAddress = String(order?.delivery_address || "").trim()
   const notes = String(order?.notes || order?.special_instructions || "").trim()
   const orderCode = String(order?.short_code || order?.id || "\u2014")
   const status = getOrderStatusLabel(order?.status)
@@ -35,7 +53,12 @@ export function ReceiptContent({ order, restaurantName }: ReceiptContentProps) {
       <View style={styles.metaBlock}>
         <Text style={styles.metaText}>Date: {receiptDate}</Text>
         <Text style={styles.metaText}>Customer: {customerName}</Text>
+        <Text style={styles.metaText}>Order Type: {fulfillmentType}</Text>
+        <Text style={styles.metaText}>Payment: {paymentCollection}</Text>
         {customerPhone ? <Text style={styles.metaText}>Phone: {customerPhone}</Text> : null}
+        {deliveryPostcode ? <Text style={styles.metaText}>Postcode: {deliveryPostcode}</Text> : null}
+        {deliveryAddress ? <Text style={styles.metaText}>Address: {deliveryAddress}</Text> : null}
+        {cardTransactionId ? <Text style={styles.metaText}>Card Ref: {cardTransactionId}</Text> : null}
         {notes ? <Text style={styles.metaText}>Notes: {notes}</Text> : null}
       </View>
 

@@ -1,0 +1,192 @@
+// @ts-nocheck
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.8"
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+}
+
+function jsonResponse(status: number, payload: Record<string, unknown>) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS,
+    },
+  })
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function normalizePaymentStatus(value: unknown): "unpaid" | "paid" {
+  return normalizeString(value).toLowerCase() === "paid" ? "paid" : "unpaid"
+}
+
+function normalizePaymentMethod(value: unknown): "cash" | "card" | null {
+  const normalized = normalizeString(value).toLowerCase()
+  if (normalized === "cash" || normalized === "card") {
+    return normalized
+  }
+  return null
+}
+
+function resolvePaymentPin(): string {
+  return (
+    normalizeString(Deno.env.get("MOBILE_ONBOARDING_ORDER_PAYMENT_PIN")) ||
+    normalizeString(Deno.env.get("ORDER_PAYMENT_PIN"))
+  )
+}
+
+async function resolveUserId(request: Request, supabaseUrl: string, supabaseAnonKey: string) {
+  const authHeader =
+    normalizeString(request.headers.get("Authorization")) || normalizeString(request.headers.get("authorization"))
+  if (!authHeader) {
+    return ""
+  }
+
+  const authClient = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      headers: {
+        Authorization: authHeader,
+      },
+    },
+  })
+
+  const authResult = await authClient.auth.getUser()
+  if (authResult.error) {
+    throw new Error(authResult.error.message)
+  }
+
+  return normalizeString(authResult.data.user?.id)
+}
+
+serve(async (request) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS })
+  }
+
+  if (request.method !== "POST") {
+    return jsonResponse(405, { error: "Method not allowed. Use POST." })
+  }
+
+  const supabaseUrl = normalizeString(Deno.env.get("SUPABASE_URL"))
+  const supabaseAnonKey = normalizeString(Deno.env.get("SUPABASE_ANON_KEY"))
+  const supabaseServiceRoleKey = normalizeString(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))
+  const expectedPin = resolvePaymentPin()
+
+  if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
+    return jsonResponse(500, { error: "Supabase function environment is incomplete." })
+  }
+  if (!expectedPin) {
+    return jsonResponse(500, {
+      error: "Order payment PIN is not configured. Set ORDER_PAYMENT_PIN in Supabase secrets.",
+    })
+  }
+
+  let userId = ""
+  try {
+    userId = await resolveUserId(request, supabaseUrl, supabaseAnonKey)
+  } catch (error) {
+    return jsonResponse(401, { error: error instanceof Error ? error.message : "Unauthorized." })
+  }
+
+  if (!userId) {
+    return jsonResponse(401, { error: "Unauthorized." })
+  }
+
+  const body = await request.json().catch(() => null)
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return jsonResponse(400, { error: "Body must be a JSON object." })
+  }
+
+  const bodyObj = body as Record<string, unknown>
+  const restaurantId = normalizeString(bodyObj.restaurant_id)
+  const orderId = normalizeString(bodyObj.order_id)
+  const pin = normalizeString(bodyObj.pin)
+  const paymentStatus = normalizePaymentStatus(bodyObj.payment_status)
+  const paymentMethod = normalizePaymentMethod(bodyObj.payment_method)
+  const cardTransactionId = normalizeString(bodyObj.card_transaction_id)
+
+  if (!restaurantId) {
+    return jsonResponse(400, { error: "restaurant_id is required." })
+  }
+  if (!orderId) {
+    return jsonResponse(400, { error: "order_id is required." })
+  }
+  if (!pin) {
+    return jsonResponse(400, { error: "pin is required." })
+  }
+  if (pin !== expectedPin) {
+    return jsonResponse(403, { error: "Incorrect PIN." })
+  }
+  if (paymentStatus === "paid" && !paymentMethod) {
+    return jsonResponse(400, { error: "Choose cash or card before marking the order as paid." })
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+
+  const restaurantLookup = await supabase
+    .from("restaurants")
+    .select("id")
+    .eq("id", restaurantId)
+    .eq("owner_user_id", userId)
+    .maybeSingle()
+
+  if (restaurantLookup.error) {
+    return jsonResponse(500, { error: restaurantLookup.error.message })
+  }
+  if (!restaurantLookup.data?.id) {
+    return jsonResponse(403, { error: "You do not have access to this restaurant." })
+  }
+
+  const updateResult = await supabase
+    .from("restaurant_orders")
+    .update({
+      payment_status: paymentStatus,
+      payment_method: paymentStatus === "paid" ? paymentMethod : null,
+      card_transaction_id: paymentStatus === "paid" && paymentMethod === "card" ? cardTransactionId || null : null,
+      payment_updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", orderId)
+    .eq("restaurant_id", restaurantId)
+    .select("id, payment_status, payment_method, card_transaction_id")
+    .maybeSingle()
+
+  if (updateResult.error) {
+    const message = normalizeString(updateResult.error.message)
+    const lower = message.toLowerCase()
+
+    if (
+      lower.includes("payment_status") ||
+      lower.includes("payment_method") ||
+      lower.includes("card_transaction_id")
+    ) {
+      return jsonResponse(500, {
+        error: message || "Order payment fields are missing.",
+        remediation: "Run supabase/014_order_payment_settlement.sql in Supabase SQL Editor, then retry.",
+      })
+    }
+
+    return jsonResponse(500, { error: message || "Failed to update order payment." })
+  }
+
+  if (!updateResult.data?.id) {
+    return jsonResponse(404, { error: "Order not found for this restaurant." })
+  }
+
+  return jsonResponse(200, {
+    ok: true,
+    order_id: normalizeString(updateResult.data.id),
+    payment_status: normalizeString(updateResult.data.payment_status) || paymentStatus,
+    payment_method: normalizeString(updateResult.data.payment_method) || null,
+    card_transaction_id: normalizeString(updateResult.data.card_transaction_id) || null,
+  })
+})
