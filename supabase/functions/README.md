@@ -94,7 +94,28 @@ Request body:
 }
 ```
 
-## 5) place-order-atomic
+## 5) get-order-quote
+
+Path:
+
+`/get-order-quote`
+
+Request body:
+
+```json
+{
+  "agent_id": "AGENT_ID_FROM_ELEVENLABS",
+  "restaurant_id": "OPTIONAL_RESTAURANT_UUID",
+  "conversation_id": "OPTIONAL_CONVERSATION_ID",
+  "fulfillment_type": "pickup",
+  "items": [
+    { "item_id": "MENU_ITEM_UUID", "quantity": 2 },
+    { "item_id": "MENU_ITEM_UUID_2", "quantity": 1 }
+  ]
+}
+```
+
+## 6) place-order-atomic
 
 Path:
 
@@ -121,7 +142,7 @@ Request body:
 }
 ```
 
-## 6) update-order-payment-status
+## 7) update-order-payment-status
 
 Path:
 
@@ -151,11 +172,12 @@ Request body:
    - `supabase/010_manual_order_stock_atomic.sql`
    - `supabase/013_order_fulfillment_and_delivery_fields.sql`
    - `supabase/014_order_payment_settlement.sql`
-2. Deploy all 6 tool functions:
+2. Deploy all 7 tool functions:
    - `supabase functions deploy get-menu-items`
    - `supabase functions deploy get-item-customizations`
    - `supabase functions deploy check-item-stock`
    - `supabase functions deploy lookup-uk-postcode-addresses`
+   - `supabase functions deploy get-order-quote`
    - `supabase functions deploy place-order-atomic`
    - `supabase functions deploy update-order-payment-status`
 3. Set secrets:

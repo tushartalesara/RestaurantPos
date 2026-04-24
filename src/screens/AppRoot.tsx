@@ -40,6 +40,8 @@ import {
 } from "../auth"
 import {
   deleteRestaurantOrder,
+  getBillingConfig,
+  getCountryTaxRates,
   getVoiceAgentLink,
   initDatabase,
   insertMenuScan,
@@ -47,17 +49,20 @@ import {
   listRestaurantMenuItems,
   listRestaurants,
   replaceRestaurantMenuItems,
+  saveBillingConfig,
   saveRestaurantOrder,
   saveRestaurant,
   updateRestaurantOrderPayment,
   saveVoiceAgentLink,
 } from "../db"
+import { getSupportedBillingCountry, SUPPORTED_BILLING_COUNTRIES } from "../constants/billing"
 import { createEmptyMenuItem, parseMenuText } from "../menu-parser"
 import { parseMenuFromImageWithGemini } from "../gemini-parser"
 import type {
   AppMode,
   AppNotice,
   AuthMode,
+  BillingConfig,
   FulfillmentType,
   MenuCustomizationDraft,
   MenuItemDraft,
@@ -75,11 +80,13 @@ import type {
   UiOrderDraft,
   VoiceAgentLinkRecord,
 } from "../types"
+import { billingConfigToDraftBreakdown, getTipAmountFromPercent, normalizeOrderBillingBreakdown } from "../utils/billing"
 import {
   generateCombinedReceiptHTML as generateCombinedReceiptHTMLUtil,
   generateReceiptHTML as generateReceiptHTMLUtil,
   printReceiptHtml,
 } from "../utils/printUtils"
+import { getCurrencySymbol as getCurrencySymbolUtil } from "../utils/formatters"
 import { CallReviewModal } from "../modals/CallReviewModal"
 import { ReceiptPreviewModal } from "../modals/ReceiptPreviewModal"
 import { ChannelBadge } from "../components/ChannelBadge"
@@ -116,6 +123,7 @@ const SYSTEM_PRINT_SHEET_ID = "system-print-sheet"
 type DaySummarySnapshot = {
   reportDateLabel: string
   printedAtLabel: string
+  currencyCode: string
   totalOrders: number
   pendingOrders: number
   completedOrders: number
@@ -1060,6 +1068,16 @@ function orderToUiDraft(order: RestaurantOrderRecord): UiOrderDraft {
     createdAt: order.created_at ?? null,
     status: order.status,
     notes: order.notes || "",
+    subtotalAmount: Number(order.subtotalAmount || 0),
+    taxAmount: Number(order.taxAmount || 0),
+    taxRatePercent: Number(order.taxRatePercent || 0),
+    taxInclusive: Boolean(order.taxInclusive),
+    taxLabel: order.taxLabel || "VAT",
+    serviceFeeAmount: Number(order.serviceFeeAmount || 0),
+    serviceFeeLabel: order.serviceFeeLabel || "Service Charge",
+    tipAmount: Number(order.tipAmount || 0),
+    tipLabel: order.tipLabel || "Gratuity",
+    currencyCode: order.currencyCode || DEFAULT_CURRENCY_CODE,
     itemsText: orderItemsToText(order),
     callReview: order.callReview || null,
   }
@@ -1088,6 +1106,16 @@ function createEmptyOrderDraft(): UiOrderDraft {
     createdAt: null,
     status: "pending",
     notes: "",
+    subtotalAmount: 0,
+    taxAmount: 0,
+    taxRatePercent: 0,
+    taxInclusive: false,
+    taxLabel: "VAT",
+    serviceFeeAmount: 0,
+    serviceFeeLabel: "Service Charge",
+    tipAmount: 0,
+    tipLabel: "Gratuity",
+    currencyCode: DEFAULT_CURRENCY_CODE,
     itemsText: "",
   }
 }
@@ -1226,12 +1254,12 @@ function getCustomizationChoiceLabel(group: MenuCustomizationGroup, option: Menu
   return option.label.trim() || group.label
 }
 
-function formatCustomizationPriceDelta(priceDelta: number): string {
+function formatCustomizationPriceDelta(priceDelta: number, currencyCode?: string | null): string {
   const normalized = Number(priceDelta || 0)
   if (!normalized) {
     return ""
   }
-  return ` (+${formatCurrencyDisplay(normalized)})`
+  return ` (+${formatCurrencyDisplay(normalized, currencyCode)})`
 }
 
 function stripOrderItemMetadata(value: string): string {
@@ -1456,16 +1484,20 @@ function formatShortOrderCode(value: number | null | undefined): string | null {
   return String(Math.round(value)).padStart(3, "0")
 }
 
-const CURRENCY_SYMBOL = "\u00A3"
+const DEFAULT_CURRENCY_CODE = "GBP"
 const HTML_CURRENCY_ENTITY = "&pound;"
 
-function formatCurrencyDisplay(value: number | null | undefined): string {
+function getCurrencySymbol(currencyCode?: string | null) {
+  return getCurrencySymbolUtil(currencyCode || DEFAULT_CURRENCY_CODE)
+}
+
+function formatCurrencyDisplay(value: number | null | undefined, currencyCode?: string | null): string {
   const normalizedValue = Number(value || 0)
   if (!Number.isFinite(normalizedValue)) {
-    return `${CURRENCY_SYMBOL}0.00`
+    return `${getCurrencySymbol(currencyCode)}0.00`
   }
 
-  return `${CURRENCY_SYMBOL}${normalizedValue.toFixed(2)}`
+  return `${getCurrencySymbol(currencyCode)}${normalizedValue.toFixed(2)}`
 }
 
 function formatAudioTime(value: number | null | undefined): string {
@@ -1628,6 +1660,16 @@ type ReceiptOrder = {
   card_transaction_id?: string | null
   notes?: string | null
   special_instructions?: string | null
+  subtotal_amount?: number | string | null
+  tax_amount?: number | string | null
+  tax_rate_percent?: number | string | null
+  tax_inclusive?: boolean | null
+  tax_label?: string | null
+  service_fee_amount?: number | string | null
+  service_fee_label?: string | null
+  tip_amount?: number | string | null
+  tip_label?: string | null
+  currency_code?: string | null
   total_amount?: number | string | null
   total?: number | string | null
   items?: ReceiptLineItem[]
@@ -1651,6 +1693,7 @@ type ActivePaymentUpdateState = {
   pin: string
   paymentMethod: PaymentMethod
   cardTransactionId: string
+  tipAmount: string
 }
 
 type MenuCustomizationGroup = {
@@ -1692,6 +1735,29 @@ function formatReceiptDate(value: string | null | undefined): string {
 function getReceiptNumericString(value: number | string | null | undefined): string {
   const parsedValue = Number.parseFloat(String(value ?? 0))
   return Number.isFinite(parsedValue) ? parsedValue.toFixed(2) : "0.00"
+}
+
+function getItemsSubtotalAmount(items: Array<{ quantity?: number | string | null; unitPrice?: number | string | null; price?: number | string | null }>) {
+  return items.reduce((sum, item) => {
+    const quantity = Math.max(1, Number(item.quantity || 1))
+    const unitPrice = item.unitPrice !== undefined ? Number(item.unitPrice || 0) : Number(item.price || 0) / quantity
+    return sum + quantity * unitPrice
+  }, 0)
+}
+
+function getUiOrderBillingBreakdown(
+  order: UiOrderDraft,
+  options?: {
+    fallbackSubtotalAmount?: number
+    fallbackCurrencyCode?: string
+    fallbackTipLabel?: string
+  },
+) {
+  return normalizeOrderBillingBreakdown(order, {
+    fallbackSubtotalAmount: options?.fallbackSubtotalAmount,
+    fallbackCurrencyCode: order.currencyCode || options?.fallbackCurrencyCode || DEFAULT_CURRENCY_CODE,
+    fallbackTipLabel: order.tipLabel || options?.fallbackTipLabel || "Gratuity",
+  })
 }
 
 type ThermalPreviewModalProps = {
@@ -2558,8 +2624,9 @@ function parseTranscriptEntries(transcriptText: string) {
   return entries
 }
 
-function renderCompactOrderLines(items: RestaurantOrderRecord["items"], params?: { emptyLabel?: string }) {
+function renderCompactOrderLines(items: RestaurantOrderRecord["items"], params?: { emptyLabel?: string; currencyCode?: string }) {
   const emptyLabel = params?.emptyLabel || "No items yet."
+  const currencyCode = params?.currencyCode || DEFAULT_CURRENCY_CODE
 
   if (items.length === 0) {
     return <Text style={styles.orderItemsEmptyText}>{emptyLabel}</Text>
@@ -2578,7 +2645,7 @@ function renderCompactOrderLines(items: RestaurantOrderRecord["items"], params?:
             <Text style={styles.orderItemName} numberOfLines={1}>
               {item.name} × {quantity}
             </Text>
-            <Text style={styles.orderItemPrice}>{formatCurrencyDisplay(lineTotal)}</Text>
+            <Text style={styles.orderItemPrice}>{formatCurrencyDisplay(lineTotal, currencyCode)}</Text>
           </View>
         )
       })}
@@ -2666,6 +2733,8 @@ export default function App() {
   const [restaurantName, setRestaurantName] = useState("")
   const [restaurantPhone, setRestaurantPhone] = useState("")
   const [restaurantAddress, setRestaurantAddress] = useState("")
+  const [billingConfig, setBillingConfig] = useState<BillingConfig | null>(null)
+  const selectedCurrencyCode = billingConfig?.currencyCode || selectedRestaurant?.currencyCode || DEFAULT_CURRENCY_CODE
 
   const [imageUri, setImageUri] = useState<string | null>(null)
   const [imageBase64, setImageBase64] = useState("")
@@ -3031,6 +3100,7 @@ export default function App() {
       setRestaurantName("")
       setRestaurantPhone("")
       setRestaurantAddress("")
+      setBillingConfig(null)
       setImageUri(null)
       setImageBase64("")
       setRawMenuText("")
@@ -3064,6 +3134,7 @@ export default function App() {
     setRestaurantName(selectedRestaurant.name)
     setRestaurantPhone(selectedRestaurant.phone || "")
     setRestaurantAddress(selectedRestaurant.address || "")
+    setBillingConfig(null)
     setImageUri(null)
     setImageBase64("")
     setRawMenuText("")
@@ -3081,12 +3152,13 @@ export default function App() {
     setActiveCallReview(null)
     ;(async () => {
       try {
-        const [items, fetchedOrders, voiceLink, storedApiKey, storedPrintPreferences] = await Promise.all([
+        const [items, fetchedOrders, voiceLink, storedApiKey, storedPrintPreferences, loadedBillingConfig] = await Promise.all([
           listRestaurantMenuItems(selectedRestaurant.id),
           listRestaurantOrders(selectedRestaurant.id),
           getVoiceAgentLink(selectedRestaurant.id),
           loadStoredElevenLabsApiKey(selectedRestaurant.id),
           loadStoredPrintPreferences(selectedRestaurant.id),
+          getBillingConfig(selectedRestaurant.id),
         ])
 
         if (cancelled) {
@@ -3103,6 +3175,7 @@ export default function App() {
         setElevenLabsApiKey(storedApiKey)
         setIsEditingElevenLabsApiKey(Boolean(voiceLink) && !storedApiKey)
         setManualAgentId(voiceLink?.workspace_agent_id || "")
+        setBillingConfig(loadedBillingConfig)
         setPrintPreferences(storedPrintPreferences)
         setAvailablePrinterOptions(mergePrinterOptions(getDefaultPrinterOptions(), getStoredPrinterOption(storedPrintPreferences)))
         knownOrderIdsRef.current = new Set(
@@ -3125,6 +3198,49 @@ export default function App() {
       cancelled = true
     }
   }, [selectedRestaurantId, selectedRestaurant])
+
+  useEffect(() => {
+    if (!selectedRestaurant || !billingConfig?.countryCode) {
+      return
+    }
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        const nextRates = await getCountryTaxRates(billingConfig.countryCode)
+        if (cancelled) {
+          return
+        }
+
+        setBillingConfig((current) => {
+          if (!current || current.countryCode !== billingConfig.countryCode) {
+            return current
+          }
+
+          const nextSelectedTaxRate =
+            nextRates.find((rate) => rate.id === current.taxRateId) ||
+            nextRates.find((rate) => rate.isDefault) ||
+            nextRates[0] ||
+            null
+
+          return {
+            ...current,
+            availableTaxRates: nextRates,
+            taxRateId: nextSelectedTaxRate?.id || null,
+            taxLabel: current.taxLabel || nextSelectedTaxRate?.taxName || "VAT",
+            resolvedTaxRatePercent:
+              current.taxRateOverride !== null && current.taxRateOverride !== undefined
+                ? current.taxRateOverride
+                : nextSelectedTaxRate?.ratePercent || 0,
+          }
+        })
+      } catch {}
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [billingConfig?.countryCode, selectedRestaurant?.id])
 
   useEffect(() => {
     queuedNewOrderAlertCountsRef.current = []
@@ -3590,6 +3706,7 @@ export default function App() {
     setUser(null)
     setRestaurants([])
     setSelectedRestaurantId(null)
+    setBillingConfig(null)
     setDraftItems([])
     setSavedItems([])
     setEditableMenuItems([])
@@ -3627,6 +3744,7 @@ export default function App() {
       pin: "",
       paymentMethod: normalizePaymentMethod(draft.paymentMethod) || "cash",
       cardTransactionId: draft.cardTransactionId || "",
+      tipAmount: Number(draft.tipAmount || 0).toFixed(2),
     })
   }
 
@@ -3639,6 +3757,7 @@ export default function App() {
     paymentStatus: PaymentStatus
     paymentMethod?: PaymentMethod | null
     cardTransactionId?: string | null
+    tipAmount?: number | null
     successTitle: string
     successMessage: string
   }) {
@@ -3665,6 +3784,7 @@ export default function App() {
         paymentStatus: params.paymentStatus,
         paymentMethod: params.paymentMethod || null,
         cardTransactionId: params.cardTransactionId || null,
+        tipAmount: params.tipAmount ?? 0,
       })
       await refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: true })
       setActivePaymentUpdate(null)
@@ -3686,11 +3806,15 @@ export default function App() {
     }
 
     const paymentMethod = activePaymentUpdate.paymentMethod
+    const parsedTipAmount = Number.parseFloat(activePaymentUpdate.tipAmount)
+    const tipAmount = Number.isFinite(parsedTipAmount) ? Math.max(0, parsedTipAmount) : 0
+
     await submitOrderPaymentUpdate({
       index: activePaymentUpdate.index,
       paymentStatus: "paid",
       paymentMethod,
       cardTransactionId: paymentMethod === "card" ? activePaymentUpdate.cardTransactionId.trim() || null : null,
+      tipAmount,
       successTitle: "Payment Updated",
       successMessage: paymentMethod === "card" ? "Order marked as card paid." : "Order marked as cash paid.",
     })
@@ -3706,6 +3830,7 @@ export default function App() {
       paymentStatus: "unpaid",
       paymentMethod: null,
       cardTransactionId: null,
+      tipAmount: 0,
       successTitle: "Payment Updated",
       successMessage: "Order moved back to unpaid.",
     })
@@ -4545,6 +4670,143 @@ export default function App() {
     }
   }
 
+  function updateLocalBillingConfig(patch: Partial<BillingConfig>) {
+    setBillingConfig((current) => (current ? { ...current, ...patch } : current))
+  }
+
+  function getDraftBillingSnapshot(
+    order: UiOrderDraft,
+    parsedItems?: RestaurantOrderRecord["items"],
+    options?: { tipAmountOverride?: number | null },
+  ) {
+    const nextParsedItems = parsedItems || parseOrderItemsFromText(order.itemsText)
+    const fallbackSubtotalAmount = getItemsSubtotalAmount(nextParsedItems)
+    const normalizedStoredBilling = getUiOrderBillingBreakdown(order, {
+      fallbackSubtotalAmount,
+      fallbackCurrencyCode: selectedCurrencyCode,
+      fallbackTipLabel: billingConfig?.tipLabel || "Gratuity",
+    })
+    const baseBilling = normalizedStoredBilling.hasStoredBreakdown
+      ? normalizedStoredBilling
+      : billingConfigToDraftBreakdown(billingConfig, fallbackSubtotalAmount, Number(order.tipAmount || 0))
+
+    if (options?.tipAmountOverride === undefined || options.tipAmountOverride === null) {
+      return baseBilling
+    }
+
+    const tipAmountOverride = Number(options.tipAmountOverride)
+    const normalizedTipAmount = Number.isFinite(tipAmountOverride)
+      ? Math.max(0, Math.round((tipAmountOverride + Number.EPSILON) * 100) / 100)
+      : 0
+
+    return {
+      ...baseBilling,
+      tipAmount: normalizedTipAmount,
+      totalAmount: Math.round((baseBilling.totalBeforeTip + normalizedTipAmount + Number.EPSILON) * 100) / 100,
+    }
+  }
+
+  function handleBillingCountryChange(countryCode: string) {
+    const selectedCountry = getSupportedBillingCountry(countryCode)
+    setBillingConfig((current) =>
+      current
+        ? {
+            ...current,
+            countryCode,
+            currencyCode: selectedCountry?.currencyCode || current.currencyCode,
+            taxRateId: null,
+            taxRateOverride: null,
+            resolvedTaxRatePercent: 0,
+            taxLabel: selectedCountry?.defaultTaxLabel || current.taxLabel || "VAT",
+            availableTaxRates: [],
+          }
+        : current,
+    )
+  }
+
+  function handleBillingTaxRateSelect(taxRateId: string) {
+    setBillingConfig((current) => {
+      if (!current) {
+        return current
+      }
+
+      const selectedTaxRate = current.availableTaxRates.find((taxRate) => taxRate.id === taxRateId) || null
+
+      return {
+        ...current,
+        taxRateId,
+        taxRateOverride: null,
+        resolvedTaxRatePercent: selectedTaxRate?.ratePercent || 0,
+        taxLabel: selectedTaxRate?.taxName || current.taxLabel,
+      }
+    })
+  }
+
+  function handleBillingTaxRateOverrideChange(value: string) {
+    const sanitizedValue = value.replace(/[^0-9.]/g, "")
+    const decimalIndex = sanitizedValue.indexOf(".")
+    const normalizedValue =
+      decimalIndex >= 0
+        ? `${sanitizedValue.slice(0, decimalIndex + 1)}${sanitizedValue.slice(decimalIndex + 1).replace(/\./g, "")}`
+        : sanitizedValue
+
+    setBillingConfig((current) => {
+      if (!current) {
+        return current
+      }
+
+      if (!normalizedValue.trim()) {
+        const selectedTaxRate = current.availableTaxRates.find((taxRate) => taxRate.id === current.taxRateId) || null
+        return {
+          ...current,
+          taxRateOverride: null,
+          resolvedTaxRatePercent: selectedTaxRate?.ratePercent || 0,
+        }
+      }
+
+      const parsedRate = Number.parseFloat(normalizedValue)
+      const nextRate = Number.isFinite(parsedRate) ? Math.max(0, parsedRate) : 0
+
+      return {
+        ...current,
+        taxRateOverride: nextRate,
+        resolvedTaxRatePercent: nextRate,
+      }
+    })
+  }
+
+  async function handleSaveBillingConfiguration() {
+    if (!selectedRestaurant || !billingConfig) {
+      return
+    }
+
+    setBusy(true)
+    try {
+      const savedConfig = await saveBillingConfig(billingConfig)
+      setBillingConfig(savedConfig)
+      setRestaurants((current) =>
+        current.map((restaurant) =>
+          restaurant.id === selectedRestaurant.id
+            ? {
+                ...restaurant,
+                countryCode: savedConfig.countryCode,
+                currencyCode: savedConfig.currencyCode,
+              }
+            : restaurant,
+        ),
+      )
+      showNotification("Saved", "Billing settings updated.", "success")
+    } catch (error) {
+      showNotification(
+        "Save Failed",
+        error instanceof Error ? error.message : "Failed to save billing settings.",
+        "error",
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function persistOrderDraft(index: number, patch?: Partial<UiOrderDraft>) {
     if (!selectedRestaurant) return null
 
@@ -4935,7 +5197,7 @@ export default function App() {
                             {customizationSummary}
                           </Text>
                         ) : null}
-                        <Text style={styles.orderItemPickerRowPrice}>{formatCurrencyDisplay(Number(item.basePrice || 0))}</Text>
+                        <Text style={styles.orderItemPickerRowPrice}>{formatCurrencyDisplay(Number(item.basePrice || 0), selectedCurrencyCode)}</Text>
                       </View>
 
                       <View style={[styles.orderItemPickerActionWrap, useOrderItemGrid ? styles.orderItemPickerActionWrapGrid : null]}>
@@ -5008,7 +5270,7 @@ export default function App() {
             {selectedItems.length > 0 ? (
               <View style={styles.orderItemPickerFooter}>
                 <Text style={styles.orderItemPickerFooterText}>{selectedItems.length} item(s) selected</Text>
-                <Text style={styles.orderItemPickerFooterTotal}>{formatCurrencyDisplay(selectedTotal)}</Text>
+                <Text style={styles.orderItemPickerFooterTotal}>{formatCurrencyDisplay(selectedTotal, selectedCurrencyCode)}</Text>
               </View>
             ) : null}
           </View>
@@ -5054,7 +5316,7 @@ export default function App() {
             <View style={editModalStyles.customizationIntroCard}>
               <Text style={editModalStyles.customizationItemTitle}>{activeItemCustomization.menuItem.name}</Text>
               <Text style={editModalStyles.customizationItemPrice}>
-                {formatCurrencyDisplay(Number(activeItemCustomization.menuItem.basePrice || 0))}
+                {formatCurrencyDisplay(Number(activeItemCustomization.menuItem.basePrice || 0), selectedCurrencyCode)}
               </Text>
               <Text style={editModalStyles.customizationItemHint}>
                 Choose sauces, combos, and extras before adding this item to the order.
@@ -5092,7 +5354,7 @@ export default function App() {
                           ]}
                         >
                           {getCustomizationChoiceLabel(group, option)}
-                          {formatCustomizationPriceDelta(Number(option.priceDelta || 0))}
+                          {formatCustomizationPriceDelta(Number(option.priceDelta || 0), selectedCurrencyCode)}
                         </Text>
                       </Pressable>
                     )
@@ -5117,9 +5379,11 @@ export default function App() {
     }
 
     const editorItems = parseOrderItemsFromText(editorDraft.itemsText)
-    const editorTotal = editorItems.reduce(
-      (sum, item) => sum + Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0),
-      0,
+    const editorSubtotalAmount = getItemsSubtotalAmount(editorItems)
+    const editorBilling = billingConfigToDraftBreakdown(
+      billingConfig,
+      editorSubtotalAmount,
+      Number(editorDraft.tipAmount || 0),
     )
     const editorFulfillmentType = normalizeFulfillmentType(editorDraft.fulfillmentType)
     const editorPaymentCollection = resolvePaymentCollection(editorFulfillmentType, editorDraft.paymentCollection)
@@ -5330,14 +5594,14 @@ export default function App() {
                             {item.name}
                           </Text>
                           <Text style={editModalStyles.itemMeta}>
-                            {quantity} {"\u00D7"} {formatCurrencyDisplay(unitPrice)}
+                            {quantity} {"\u00D7"} {formatCurrencyDisplay(unitPrice, editorBilling.currencyCode)}
                           </Text>
                         </View>
                         <View style={editModalStyles.itemActions}>
                           <View style={editModalStyles.itemQuantityBadge}>
                             <Text style={editModalStyles.itemQuantityBadgeText}>Qty {quantity}</Text>
                           </View>
-                          <Text style={editModalStyles.itemPrice}>{formatCurrencyDisplay(lineTotal)}</Text>
+                          <Text style={editModalStyles.itemPrice}>{formatCurrencyDisplay(lineTotal, editorBilling.currencyCode)}</Text>
                           <Pressable
                             style={editModalStyles.itemRemoveButton}
                             onPress={() => removeOrderDraftItem(activeOrderEditor.index, itemIndex)}
@@ -5353,8 +5617,26 @@ export default function App() {
               </View>
 
               <View style={editModalStyles.totalRow}>
+                <Text style={editModalStyles.totalLabel}>SUBTOTAL</Text>
+                <Text style={editModalStyles.totalAmount}>{formatCurrencyDisplay(editorBilling.subtotalAmount, editorBilling.currencyCode)}</Text>
+              </View>
+              {editorBilling.taxAmount > 0 ? (
+                <View style={editModalStyles.totalRow}>
+                  <Text style={editModalStyles.totalLabel}>
+                    {editorBilling.taxLabel.toUpperCase()} ({editorBilling.taxRatePercent.toFixed(2)}%)
+                  </Text>
+                  <Text style={editModalStyles.totalAmount}>{formatCurrencyDisplay(editorBilling.taxAmount, editorBilling.currencyCode)}</Text>
+                </View>
+              ) : null}
+              {editorBilling.serviceFeeAmount > 0 ? (
+                <View style={editModalStyles.totalRow}>
+                  <Text style={editModalStyles.totalLabel}>{editorBilling.serviceFeeLabel.toUpperCase()}</Text>
+                  <Text style={editModalStyles.totalAmount}>{formatCurrencyDisplay(editorBilling.serviceFeeAmount, editorBilling.currencyCode)}</Text>
+                </View>
+              ) : null}
+              <View style={editModalStyles.totalRow}>
                 <Text style={editModalStyles.totalLabel}>TOTAL</Text>
-                <Text style={editModalStyles.totalAmount}>{formatCurrencyDisplay(editorTotal)}</Text>
+                <Text style={editModalStyles.totalAmount}>{formatCurrencyDisplay(editorBilling.totalAmount, editorBilling.currencyCode)}</Text>
               </View>
 
               <Pressable style={editModalStyles.removeOrderButton} onPress={handleRemoveOrderFromEditor} disabled={busy}>
@@ -5387,6 +5669,15 @@ export default function App() {
       paymentStatus,
       paymentMethod,
     })
+    const draftItemsPreview = parseOrderItemsFromText(draft.itemsText)
+    const parsedTipAmount = Number.parseFloat(activePaymentUpdate.tipAmount)
+    const tipAmountPreview = Number.isFinite(parsedTipAmount) ? Math.max(0, parsedTipAmount) : 0
+    const billingPreview = getDraftBillingSnapshot(draft, draftItemsPreview, {
+      tipAmountOverride: tipAmountPreview,
+    })
+    const showTipControls = fulfillmentType === "pickup" || billingPreview.tipAmount > 0
+    const tipSuggestions = billingConfig?.tipSuggestions || []
+    const showTipSuggestions = fulfillmentType === "pickup" && Boolean(billingConfig?.tipEnabled) && tipSuggestions.length > 0
     const canResetToUnpaid = paymentStatus === "paid"
 
     return (
@@ -5414,6 +5705,55 @@ export default function App() {
                   <Text style={[styles.orderMetaBadgeText, styles.orderMetaBadgeTextDelivery]}>DELIVERY</Text>
                 </View>
               ) : null}
+            </View>
+
+            <View style={styles.posSummaryCard}>
+              <View style={styles.posSummaryRow}>
+                <Text style={styles.posSummaryLabel}>Subtotal</Text>
+                <Text style={styles.posSummaryValue}>
+                  {formatCurrencyDisplay(billingPreview.subtotalAmount, billingPreview.currencyCode)}
+                </Text>
+              </View>
+              {billingPreview.taxAmount > 0 ? (
+                <View style={styles.posSummaryRow}>
+                  <Text style={styles.posSummaryLabel}>
+                    {billingPreview.taxLabel} ({billingPreview.taxRatePercent.toFixed(2)}%)
+                  </Text>
+                  <Text style={styles.posSummaryValue}>
+                    {formatCurrencyDisplay(billingPreview.taxAmount, billingPreview.currencyCode)}
+                  </Text>
+                </View>
+              ) : null}
+              {billingPreview.serviceFeeAmount > 0 ? (
+                <View style={styles.posSummaryRow}>
+                  <Text style={styles.posSummaryLabel}>{billingPreview.serviceFeeLabel}</Text>
+                  <Text style={styles.posSummaryValue}>
+                    {formatCurrencyDisplay(billingPreview.serviceFeeAmount, billingPreview.currencyCode)}
+                  </Text>
+                </View>
+              ) : null}
+              {showTipControls ? (
+                <>
+                  <View style={styles.posSummaryRow}>
+                    <Text style={styles.posSummaryLabel}>Total Before Tip</Text>
+                    <Text style={styles.posSummaryValue}>
+                      {formatCurrencyDisplay(billingPreview.totalBeforeTip, billingPreview.currencyCode)}
+                    </Text>
+                  </View>
+                  <View style={styles.posSummaryRow}>
+                    <Text style={styles.posSummaryLabel}>{billingPreview.tipLabel}</Text>
+                    <Text style={styles.posSummaryValue}>
+                      {formatCurrencyDisplay(billingPreview.tipAmount, billingPreview.currencyCode)}
+                    </Text>
+                  </View>
+                </>
+              ) : null}
+              <View style={[styles.posSummaryRow, styles.posSummaryRowStrong]}>
+                <Text style={[styles.posSummaryLabel, styles.posSummaryLabelStrong]}>Final Total</Text>
+                <Text style={[styles.posSummaryValue, styles.posSummaryValueStrong]}>
+                  {formatCurrencyDisplay(billingPreview.totalAmount, billingPreview.currencyCode)}
+                </Text>
+              </View>
             </View>
 
             <Text style={styles.paymentModalFieldLabel}>Waiter PIN</Text>
@@ -5474,6 +5814,75 @@ export default function App() {
                   placeholder="Optional transaction reference"
                   placeholderTextColor={COLORS.TEXT_MUTED}
                   autoCapitalize="characters"
+                  editable={!busy}
+                />
+              </>
+            ) : null}
+
+            {showTipControls ? (
+              <>
+                <Text style={styles.paymentModalFieldLabel}>{billingPreview.tipLabel}</Text>
+                {fulfillmentType === "pickup" ? (
+                  <Text style={styles.printCenterHelperText}>
+                    Add any pickup tip before marking the order as paid. It will be added to the final bill.
+                  </Text>
+                ) : null}
+                {showTipSuggestions ? (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.scannerRestaurantSelector}
+                  >
+                    {[0, ...tipSuggestions].map((tipPercent) => {
+                      const suggestedTipAmount =
+                        tipPercent <= 0 ? 0 : getTipAmountFromPercent(billingPreview.subtotalAmount, tipPercent)
+                      const isActive = Math.abs(tipAmountPreview - suggestedTipAmount) < 0.01
+
+                      return (
+                        <Pressable
+                          key={`tip-suggestion-${tipPercent}`}
+                          style={[
+                            styles.scannerRestaurantChip,
+                            isActive ? styles.scannerRestaurantChipActive : null,
+                          ]}
+                          onPress={() =>
+                            setActivePaymentUpdate((current) =>
+                              current ? { ...current, tipAmount: suggestedTipAmount.toFixed(2) } : current
+                            )
+                          }
+                          disabled={busy}
+                        >
+                          <Text
+                            style={[
+                              styles.scannerRestaurantChipText,
+                              isActive ? styles.scannerRestaurantChipTextActive : null,
+                            ]}
+                          >
+                            {tipPercent <= 0
+                              ? "No Tip"
+                              : `${tipPercent}% - ${formatCurrencyDisplay(suggestedTipAmount, billingPreview.currencyCode)}`}
+                          </Text>
+                        </Pressable>
+                      )
+                    })}
+                  </ScrollView>
+                ) : null}
+                <TextInput
+                  style={styles.paymentModalInput}
+                  value={activePaymentUpdate.tipAmount}
+                  onChangeText={(value) => {
+                    const numericOnly = value.replace(/[^0-9.]/g, "")
+                    const decimalIndex = numericOnly.indexOf(".")
+                    const sanitizedValue =
+                      decimalIndex >= 0
+                        ? `${numericOnly.slice(0, decimalIndex + 1)}${numericOnly.slice(decimalIndex + 1).replace(/\./g, "")}`
+                        : numericOnly
+
+                    setActivePaymentUpdate((current) => (current ? { ...current, tipAmount: sanitizedValue } : current))
+                  }}
+                  placeholder="Enter tip amount"
+                  placeholderTextColor={COLORS.TEXT_MUTED}
+                  keyboardType="decimal-pad"
                   editable={!busy}
                 />
               </>
@@ -5587,7 +5996,12 @@ export default function App() {
     let unpaidOutstandingTotal = 0
 
     for (const order of todayOrders) {
-      const totalPrice = Number(order.totalPrice || 0)
+      const billing = normalizeOrderBillingBreakdown(order, {
+        fallbackSubtotalAmount: Number(order.totalPrice || 0),
+        fallbackCurrencyCode: order.currencyCode || selectedCurrencyCode,
+        fallbackTipLabel: order.tipLabel || billingConfig?.tipLabel || "Gratuity",
+      })
+      const totalPrice = billing.totalAmount
       const fulfillmentType = normalizeFulfillmentType(order.fulfillmentType)
       const paymentCollection = resolvePaymentCollection(fulfillmentType, order.paymentCollection)
       const paymentStatus = normalizePaymentStatus(order.paymentStatus)
@@ -5632,6 +6046,7 @@ export default function App() {
         hour: "2-digit",
         minute: "2-digit",
       }),
+      currencyCode: selectedCurrencyCode,
       totalOrders: todayOrders.length,
       pendingOrders,
       completedOrders,
@@ -5867,7 +6282,8 @@ export default function App() {
   }
 
   function buildReceiptOrder(order: UiOrderDraft): ReceiptOrder {
-    const items = parseOrderItemsFromText(order.itemsText).map((item) => {
+    const parsedItems = parseOrderItemsFromText(order.itemsText)
+    const items = parsedItems.map((item) => {
       const quantity = Math.max(1, Number(item.quantity || 1))
       const lineTotal = quantity * Number(item.unitPrice || 0)
 
@@ -5877,7 +6293,7 @@ export default function App() {
         price: lineTotal,
       }
     })
-    const totalPrice = items.reduce((sum, item) => sum + Number(item.price || 0), 0)
+    const billing = getDraftBillingSnapshot(order, parsedItems)
     const fulfillmentType = normalizeFulfillmentType(order.fulfillmentType)
     const paymentCollection = resolvePaymentCollection(fulfillmentType, order.paymentCollection)
     const paymentStatus = normalizePaymentStatus(order.paymentStatus)
@@ -5898,9 +6314,19 @@ export default function App() {
       delivery_address: fulfillmentType === "delivery" ? order.deliveryAddress.trim() || null : null,
       card_transaction_id: paymentStatus === "paid" && paymentMethod === "card" ? order.cardTransactionId.trim() || null : null,
       notes: order.notes.trim() || null,
+      subtotal_amount: billing.subtotalAmount,
+      tax_amount: billing.taxAmount,
+      tax_rate_percent: billing.taxRatePercent,
+      tax_inclusive: billing.taxInclusive,
+      tax_label: billing.taxLabel,
+      service_fee_amount: billing.serviceFeeAmount,
+      service_fee_label: billing.serviceFeeLabel,
+      tip_amount: billing.tipAmount,
+      tip_label: billing.tipLabel,
+      currency_code: billing.currencyCode,
       items,
-      total_amount: totalPrice,
-      total: totalPrice,
+      total_amount: billing.totalAmount,
+      total: billing.totalAmount,
     }
   }
 
@@ -6178,6 +6604,7 @@ export default function App() {
 
   function renderPosOrderCard(order: UiOrderDraft, index: number) {
     const draftItemsPreview = parseOrderItemsFromText(order.itemsText)
+    const billing = getDraftBillingSnapshot(order, draftItemsPreview)
     const displayOrderCode = formatShortOrderCode(order.shortOrderCode)
     const statusTone = getOrderStatusTone(order.status)
     const statusLabel = getOrderStatusLabel(order.status)
@@ -6196,10 +6623,6 @@ export default function App() {
       paymentStatus,
       paymentMethod,
     })
-    const totalPrice = draftItemsPreview.reduce(
-      (sum, item) => sum + Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0),
-      0,
-    )
     const accentStyle = statusTone === "complete" ? styles.posOrderAccentSuccess : styles.posOrderAccentPending
     const statusPillStyle = statusTone === "complete" ? styles.posOrderStatusPillSuccess : styles.posOrderStatusPillPending
     const statusPillTextStyle = statusTone === "complete" ? styles.posOrderStatusPillTextSuccess : styles.posOrderStatusPillTextPending
@@ -6302,7 +6725,7 @@ export default function App() {
                 return (
                   <View key={`pos-order-item-${item.name}-${itemIndex}`} style={styles.posOrderItemRow}>
                     <Text style={styles.posOrderItemName}>{item.name} {"\u00D7"} {quantity}</Text>
-                    <Text style={styles.posOrderItemPrice}>{formatCurrencyDisplay(lineTotal)}</Text>
+                    <Text style={styles.posOrderItemPrice}>{formatCurrencyDisplay(lineTotal, billing.currencyCode)}</Text>
                   </View>
                 )
               })
@@ -6313,7 +6736,7 @@ export default function App() {
 
           <View style={styles.posOrderTotalRow}>
             <Text style={styles.posOrderTotalLabel}>TOTAL</Text>
-            <Text style={styles.posOrderTotalAmount}>{formatCurrencyDisplay(totalPrice)}</Text>
+            <Text style={styles.posOrderTotalAmount}>{formatCurrencyDisplay(billing.totalAmount, billing.currencyCode)}</Text>
           </View>
 
           <View style={styles.posOrderDivider} />
@@ -6391,27 +6814,29 @@ export default function App() {
           </View>
           <View style={styles.posSummaryRow}>
             <Text style={styles.posSummaryLabel}>Gross Sales</Text>
-            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.grossTotal)}</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.grossTotal, summary.currencyCode)}</Text>
           </View>
           <View style={styles.posSummaryRow}>
             <Text style={styles.posSummaryLabel}>Cash</Text>
-            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.cashTotal)}</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.cashTotal, summary.currencyCode)}</Text>
           </View>
           <View style={styles.posSummaryRow}>
-            <Text style={styles.posSummaryLabel}>Credit</Text>
-            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.creditTotal)}</Text>
+            <Text style={styles.posSummaryLabel}>Card</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.creditTotal, summary.currencyCode)}</Text>
           </View>
           <View style={styles.posSummaryRow}>
             <Text style={styles.posSummaryLabel}>COD Outstanding</Text>
-            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.codOutstandingTotal)}</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.codOutstandingTotal, summary.currencyCode)}</Text>
           </View>
           <View style={styles.posSummaryRow}>
             <Text style={styles.posSummaryLabel}>Unpaid Outstanding</Text>
-            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.unpaidOutstandingTotal)}</Text>
+            <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(summary.unpaidOutstandingTotal, summary.currencyCode)}</Text>
           </View>
           <View style={[styles.posSummaryRow, styles.posSummaryRowStrong]}>
             <Text style={[styles.posSummaryLabel, styles.posSummaryLabelStrong]}>Outstanding Total</Text>
-            <Text style={[styles.posSummaryValue, styles.posSummaryValueStrong]}>{formatCurrencyDisplay(outstandingTotal)}</Text>
+            <Text style={[styles.posSummaryValue, styles.posSummaryValueStrong]}>
+              {formatCurrencyDisplay(outstandingTotal, summary.currencyCode)}
+            </Text>
           </View>
         </View>
       </View>
@@ -6429,7 +6854,7 @@ export default function App() {
             savedItems.map((item, index) => (
               <View key={`${item.id || "pos-menu"}-${index}`} style={styles.posMenuItemCard}>
                 <Text style={styles.posMenuItemTitle}>{item.name}</Text>
-                <Text style={styles.posMenuItemMeta}>{formatCurrencyDisplay(item.basePrice)}</Text>
+                <Text style={styles.posMenuItemMeta}>{formatCurrencyDisplay(item.basePrice, selectedCurrencyCode)}</Text>
                 {item.description ? <Text style={styles.posMenuItemDescription}>{item.description}</Text> : null}
               </View>
             ))
@@ -6490,6 +6915,394 @@ export default function App() {
     }
 
     return renderPosOrdersTab()
+  }
+
+  function renderBillingTab() {
+    if (!selectedRestaurant) {
+      return (
+        <View style={[styles.settingsWideSection, isTabletLandscape ? styles.settingsWideSectionLandscape : null]}>
+          <View style={[styles.scannerCard, isTabletLandscape ? styles.scannerCardLandscape : null]}>
+            <Text style={styles.scannerCardTitle}>Billing</Text>
+            <Text style={styles.scannerDescription}>Select a restaurant first to configure taxes, service fees, tips, and currency.</Text>
+          </View>
+        </View>
+      )
+    }
+
+    if (!billingConfig) {
+      return (
+        <View style={[styles.settingsWideSection, isTabletLandscape ? styles.settingsWideSectionLandscape : null]}>
+          <View style={[styles.scannerCard, isTabletLandscape ? styles.scannerCardLandscape : null]}>
+            <Text style={styles.scannerCardTitle}>Billing</Text>
+            <ActivityIndicator color={COLORS.ACCENT} size="small" />
+            <Text style={styles.scannerDescription}>Loading billing settings...</Text>
+          </View>
+        </View>
+      )
+    }
+
+    const previewTipPercent = billingConfig.tipEnabled ? Number(billingConfig.tipSuggestions[0] || 0) : 0
+    const previewTipAmount = billingConfig.tipEnabled ? getTipAmountFromPercent(100, previewTipPercent) : 0
+    const previewBilling = billingConfigToDraftBreakdown(billingConfig, 100, previewTipAmount)
+    const selectedCountry = getSupportedBillingCountry(billingConfig.countryCode)
+    const tipSuggestionsText = billingConfig.tipSuggestions.join(", ")
+    const selectedTaxRate =
+      billingConfig.availableTaxRates.find((taxRate) => taxRate.id === billingConfig.taxRateId) || null
+    const customTaxRateText =
+      billingConfig.taxRateOverride === null || billingConfig.taxRateOverride === undefined
+        ? ""
+        : String(billingConfig.taxRateOverride)
+    const effectiveTaxRatePercent =
+      billingConfig.taxRateOverride === null || billingConfig.taxRateOverride === undefined
+        ? selectedTaxRate?.ratePercent || billingConfig.resolvedTaxRatePercent || 0
+        : billingConfig.taxRateOverride
+
+    return (
+      <View style={[styles.settingsWideSection, isTabletLandscape ? styles.settingsWideSectionLandscape : null]}>
+        <View style={[styles.settingsPanelsWrap, isTabletLandscape ? styles.settingsPanelsWrapLandscape : null]}>
+          <View style={[isTabletLandscape ? styles.settingsPanelColumnLandscape : null]}>
+            <View style={[styles.scannerCard, isTabletLandscape ? styles.scannerCardLandscape : null]}>
+              <Text style={styles.scannerCardTitle}>Billing Setup</Text>
+              <Text style={styles.scannerDescription}>
+                Taxes, service fees, tip prompts, receipts, and POS totals all use this configuration.
+              </Text>
+
+              <Text style={styles.paymentModalFieldLabel}>Country</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.scannerRestaurantSelector}
+              >
+                {SUPPORTED_BILLING_COUNTRIES.map((country) => {
+                  const isActive = billingConfig.countryCode === country.code
+                  return (
+                    <Pressable
+                      key={country.code}
+                      style={[styles.scannerRestaurantChip, isActive ? styles.scannerRestaurantChipActive : null]}
+                      onPress={() => handleBillingCountryChange(country.code)}
+                      disabled={busy}
+                    >
+                      <Text
+                        style={[
+                          styles.scannerRestaurantChipText,
+                          isActive ? styles.scannerRestaurantChipTextActive : null,
+                        ]}
+                      >
+                        {country.name}
+                      </Text>
+                    </Pressable>
+                  )
+                })}
+              </ScrollView>
+
+              <View style={styles.scannerFieldShell}>
+                <Text style={styles.scannerFieldLabel}>Currency</Text>
+                <TextInput
+                  style={styles.scannerFieldInput}
+                  value={billingConfig.currencyCode}
+                  editable={false}
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+
+              <Text style={styles.paymentModalFieldLabel}>Are menu prices tax inclusive?</Text>
+              <View style={styles.paymentMethodRow}>
+                {([
+                  { label: "Yes, tax included", value: true },
+                  { label: "No, add tax", value: false },
+                ]).map((option) => {
+                  const isActive = billingConfig.taxInclusive === option.value
+                  return (
+                    <Pressable
+                      key={`tax-mode-${String(option.value)}`}
+                      style={[styles.paymentMethodButton, isActive ? styles.paymentMethodButtonActive : null]}
+                      onPress={() => updateLocalBillingConfig({ taxInclusive: option.value })}
+                      disabled={busy}
+                    >
+                      <Text style={[styles.paymentMethodButtonText, isActive ? styles.paymentMethodButtonTextActive : null]}>
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  )
+                })}
+              </View>
+
+              <Text style={styles.printCenterHelperText}>
+                {billingConfig.taxInclusive
+                  ? `${billingConfig.taxLabel} is already included in menu prices. Orders and receipts will still show the included tax amount.`
+                  : `${billingConfig.taxLabel} will be added to the subtotal, so set the rate you want to charge below.`}
+              </Text>
+
+              <Text style={styles.paymentModalFieldLabel}>Tax Rate</Text>
+              {billingConfig.availableTaxRates.length > 0 ? (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.scannerRestaurantSelector}
+                >
+                  {billingConfig.availableTaxRates.map((taxRate) => {
+                    const isActive = billingConfig.taxRateId === taxRate.id
+                    return (
+                      <Pressable
+                        key={taxRate.id}
+                        style={[styles.scannerRestaurantChip, isActive ? styles.scannerRestaurantChipActive : null]}
+                        onPress={() => handleBillingTaxRateSelect(taxRate.id)}
+                        disabled={busy}
+                      >
+                        <Text
+                          style={[
+                            styles.scannerRestaurantChipText,
+                            isActive ? styles.scannerRestaurantChipTextActive : null,
+                          ]}
+                        >
+                          {taxRate.taxName} ({taxRate.ratePercent.toFixed(2)}%)
+                        </Text>
+                      </Pressable>
+                    )
+                  })}
+                </ScrollView>
+              ) : (
+                <Text style={styles.printCenterHelperText}>
+                  Tax rates are loading for {selectedCountry?.name || billingConfig.countryCode}. If nothing appears, run the billing SQL seeds first.
+                </Text>
+              )}
+
+              <View style={styles.scannerFieldShell}>
+                <Text style={styles.scannerFieldLabel}>Custom Tax Rate Override (%)</Text>
+                <TextInput
+                  style={styles.scannerFieldInput}
+                  value={customTaxRateText}
+                  onChangeText={handleBillingTaxRateOverrideChange}
+                  placeholder={selectedTaxRate ? `Use ${selectedTaxRate.ratePercent.toFixed(2)}%` : "Enter tax rate"}
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  keyboardType="decimal-pad"
+                  editable={!busy}
+                />
+              </View>
+
+              <Text style={styles.printCenterHelperText}>
+                {customTaxRateText
+                  ? `Using a custom ${billingConfig.taxLabel} rate of ${effectiveTaxRatePercent.toFixed(2)}% for new order totals.`
+                  : selectedTaxRate
+                    ? `Using ${selectedTaxRate.taxName} at ${selectedTaxRate.ratePercent.toFixed(2)}% for this restaurant.`
+                    : `Enter a custom rate or choose a seeded rate to calculate ${billingConfig.taxLabel.toLowerCase()} correctly.`}
+              </Text>
+
+              <View style={styles.scannerFieldShell}>
+                <Text style={styles.scannerFieldLabel}>Tax Label</Text>
+                <TextInput
+                  style={styles.scannerFieldInput}
+                  value={billingConfig.taxLabel}
+                  onChangeText={(value) => updateLocalBillingConfig({ taxLabel: value })}
+                  placeholder="VAT"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  editable={!busy}
+                />
+              </View>
+
+              <Text style={styles.printCenterHelperText}>Active tax rate: {effectiveTaxRatePercent.toFixed(2)}%</Text>
+            </View>
+          </View>
+
+          <View style={[isTabletLandscape ? styles.settingsPanelColumnLandscape : null]}>
+            <View style={[styles.scannerCard, isTabletLandscape ? styles.scannerCardLandscape : null]}>
+              <Text style={styles.scannerCardTitle}>Service Fee & Tips</Text>
+
+              <View style={styles.printToggleRow}>
+                <View style={styles.printToggleTextWrap}>
+                  <Text style={styles.printToggleTitle}>
+                    {billingConfig.serviceFeeEnabled ? "Service fee is on" : "Service fee is off"}
+                  </Text>
+                  <Text style={styles.printToggleHelperText}>Add a flat fee or percentage automatically to each order.</Text>
+                </View>
+                <Switch
+                  value={billingConfig.serviceFeeEnabled}
+                  onValueChange={(value) =>
+                    updateLocalBillingConfig({
+                      serviceFeeEnabled: value,
+                      serviceFeeType: value ? billingConfig.serviceFeeType || "percent" : null,
+                      serviceFeeValue: value ? billingConfig.serviceFeeValue : 0,
+                    })
+                  }
+                  disabled={busy}
+                  trackColor={{ false: COLORS.BORDER, true: COLORS.ACCENT_LIGHT }}
+                  thumbColor={billingConfig.serviceFeeEnabled ? COLORS.ACCENT : COLORS.SURFACE}
+                />
+              </View>
+
+              {billingConfig.serviceFeeEnabled ? (
+                <>
+                  <Text style={styles.paymentModalFieldLabel}>Service Fee Type</Text>
+                  <View style={styles.paymentMethodRow}>
+                    {([
+                      { label: "Percent", value: "percent" as const },
+                      { label: "Flat Amount", value: "flat" as const },
+                    ]).map((option) => {
+                      const isActive = billingConfig.serviceFeeType === option.value
+                      return (
+                        <Pressable
+                          key={`service-fee-${option.value}`}
+                          style={[styles.paymentMethodButton, isActive ? styles.paymentMethodButtonActive : null]}
+                          onPress={() => updateLocalBillingConfig({ serviceFeeType: option.value })}
+                          disabled={busy}
+                        >
+                          <Text
+                            style={[styles.paymentMethodButtonText, isActive ? styles.paymentMethodButtonTextActive : null]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      )
+                    })}
+                  </View>
+
+                  <View style={styles.scannerFieldShell}>
+                    <Text style={styles.scannerFieldLabel}>
+                      Service Fee Value {billingConfig.serviceFeeType === "percent" ? "(%)" : `(${billingConfig.currencyCode})`}
+                    </Text>
+                    <TextInput
+                      style={styles.scannerFieldInput}
+                      value={billingConfig.serviceFeeValue ? String(billingConfig.serviceFeeValue) : ""}
+                      onChangeText={(value) => {
+                        const parsedValue = Number.parseFloat(value)
+                        updateLocalBillingConfig({
+                          serviceFeeValue: Number.isFinite(parsedValue) ? Math.max(0, parsedValue) : 0,
+                        })
+                      }}
+                      placeholder="0"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                      keyboardType="decimal-pad"
+                      editable={!busy}
+                    />
+                  </View>
+
+                  <View style={styles.scannerFieldShell}>
+                    <Text style={styles.scannerFieldLabel}>Service Fee Label</Text>
+                    <TextInput
+                      style={styles.scannerFieldInput}
+                      value={billingConfig.serviceFeeLabel}
+                      onChangeText={(value) => updateLocalBillingConfig({ serviceFeeLabel: value })}
+                      placeholder="Service Charge"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                      editable={!busy}
+                    />
+                  </View>
+                </>
+              ) : null}
+
+              <View style={styles.printToggleRow}>
+                <View style={styles.printToggleTextWrap}>
+                  <Text style={styles.printToggleTitle}>{billingConfig.tipEnabled ? "Tips are on" : "Tips are off"}</Text>
+                  <Text style={styles.printToggleHelperText}>Tip suggestions appear in the payment modal and roll into paid totals.</Text>
+                </View>
+                <Switch
+                  value={billingConfig.tipEnabled}
+                  onValueChange={(value) =>
+                    updateLocalBillingConfig({
+                      tipEnabled: value,
+                      tipSuggestions: value && billingConfig.tipSuggestions.length === 0 ? [10, 12.5, 15, 20] : billingConfig.tipSuggestions,
+                    })
+                  }
+                  disabled={busy}
+                  trackColor={{ false: COLORS.BORDER, true: COLORS.ACCENT_LIGHT }}
+                  thumbColor={billingConfig.tipEnabled ? COLORS.ACCENT : COLORS.SURFACE}
+                />
+              </View>
+
+              {billingConfig.tipEnabled ? (
+                <>
+                  <View style={styles.scannerFieldShell}>
+                    <Text style={styles.scannerFieldLabel}>Tip Label</Text>
+                    <TextInput
+                      style={styles.scannerFieldInput}
+                      value={billingConfig.tipLabel}
+                      onChangeText={(value) => updateLocalBillingConfig({ tipLabel: value })}
+                      placeholder="Gratuity"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                      editable={!busy}
+                    />
+                  </View>
+
+                  <View style={styles.scannerFieldShell}>
+                    <Text style={styles.scannerFieldLabel}>Tip Suggestions (%)</Text>
+                    <TextInput
+                      style={styles.scannerFieldInput}
+                      value={tipSuggestionsText}
+                      onChangeText={(value) => {
+                        const nextSuggestions = value
+                          .split(",")
+                          .map((entry) => Number.parseFloat(entry.trim()))
+                          .filter((entry) => Number.isFinite(entry) && entry >= 0)
+                        updateLocalBillingConfig({ tipSuggestions: nextSuggestions })
+                      }}
+                      placeholder="10, 12.5, 15, 20"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                      keyboardType="decimal-pad"
+                      editable={!busy}
+                    />
+                  </View>
+
+                  <Text style={styles.printCenterHelperText}>
+                    Use comma-separated percentages. The payment modal calculates tips from the menu subtotal.
+                  </Text>
+                </>
+              ) : null}
+
+              <Text style={styles.paymentModalFieldLabel}>Live Preview</Text>
+              <Text style={styles.printCenterHelperText}>
+                Preview based on a {formatCurrencyDisplay(100, previewBilling.currencyCode)} menu subtotal.
+              </Text>
+              <View style={styles.posSummaryCard}>
+                <View style={styles.posSummaryRow}>
+                  <Text style={styles.posSummaryLabel}>Subtotal</Text>
+                  <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(previewBilling.subtotalAmount, previewBilling.currencyCode)}</Text>
+                </View>
+                {previewBilling.taxAmount > 0 ? (
+                  <View style={styles.posSummaryRow}>
+                    <Text style={styles.posSummaryLabel}>
+                      {previewBilling.taxLabel} ({previewBilling.taxRatePercent.toFixed(2)}%)
+                    </Text>
+                    <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(previewBilling.taxAmount, previewBilling.currencyCode)}</Text>
+                  </View>
+                ) : null}
+                {previewBilling.serviceFeeAmount > 0 ? (
+                  <View style={styles.posSummaryRow}>
+                    <Text style={styles.posSummaryLabel}>{previewBilling.serviceFeeLabel}</Text>
+                    <Text style={styles.posSummaryValue}>
+                      {formatCurrencyDisplay(previewBilling.serviceFeeAmount, previewBilling.currencyCode)}
+                    </Text>
+                  </View>
+                ) : null}
+                {previewBilling.tipAmount > 0 ? (
+                  <>
+                    <View style={styles.posSummaryRow}>
+                      <Text style={styles.posSummaryLabel}>Total Before Tip</Text>
+                      <Text style={styles.posSummaryValue}>
+                        {formatCurrencyDisplay(previewBilling.totalBeforeTip, previewBilling.currencyCode)}
+                      </Text>
+                    </View>
+                    <View style={styles.posSummaryRow}>
+                      <Text style={styles.posSummaryLabel}>{previewBilling.tipLabel}</Text>
+                      <Text style={styles.posSummaryValue}>{formatCurrencyDisplay(previewBilling.tipAmount, previewBilling.currencyCode)}</Text>
+                    </View>
+                  </>
+                ) : null}
+                <View style={[styles.posSummaryRow, styles.posSummaryRowStrong]}>
+                  <Text style={[styles.posSummaryLabel, styles.posSummaryLabelStrong]}>Total</Text>
+                  <Text style={[styles.posSummaryValue, styles.posSummaryValueStrong]}>
+                    {formatCurrencyDisplay(previewBilling.totalAmount, previewBilling.currencyCode)}
+                  </Text>
+                </View>
+              </View>
+
+              <Pressable style={styles.scannerPrimaryButton} onPress={handleSaveBillingConfiguration} disabled={busy}>
+                <Text style={styles.scannerPrimaryButtonText}>{busy ? "Saving..." : "Save Billing Settings"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </View>
+    )
   }
 
   function renderSettingsHeader() {
@@ -6655,6 +7468,26 @@ export default function App() {
               style={[
                 styles.mainTabButton,
                 isSettingsMode ? styles.settingsTabButton : null,
+                activeTab === "billing" ? styles.mainTabButtonActive : null,
+                isSettingsMode && activeTab === "billing" ? styles.settingsTabButtonActive : null,
+              ]}
+              onPress={() => setActiveTab("billing")}
+            >
+              <Text
+                style={[
+                  styles.mainTabText,
+                  activeTab === "billing" ? styles.mainTabTextActive : null,
+                  isSettingsMode ? styles.settingsTabText : null,
+                  isSettingsMode && activeTab === "billing" ? styles.settingsTabTextActive : null,
+                ]}
+              >
+                Billing
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.mainTabButton,
+                isSettingsMode ? styles.settingsTabButton : null,
                 activeTab === "menu" ? styles.mainTabButtonActive : null,
                 isSettingsMode && activeTab === "menu" ? styles.settingsTabButtonActive : null,
               ]}
@@ -6760,6 +7593,7 @@ export default function App() {
 
   function renderOrderCard(order: UiOrderDraft, index: number) {
     const draftItemsPreview = parseOrderItemsFromText(order.itemsText)
+    const billing = getDraftBillingSnapshot(order, draftItemsPreview)
     const displayOrderCode = formatShortOrderCode(order.shortOrderCode)
     const statusTone = getOrderStatusTone(order.status)
     const statusLabel = getOrderStatusLabel(order.status)
@@ -6779,10 +7613,6 @@ export default function App() {
       paymentStatus,
       paymentMethod,
     })
-    const totalPrice = draftItemsPreview.reduce(
-      (sum, item) => sum + Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0),
-      0,
-    )
     const cardStatusStyle =
       statusTone === "complete"
         ? styles.orderPosCardComplete
@@ -6841,12 +7671,13 @@ export default function App() {
         <View style={styles.orderDivider} />
         {renderCompactOrderLines(draftItemsPreview, {
           emptyLabel: "No items yet.",
+          currencyCode: billing.currencyCode,
         })}
 
         <View style={styles.orderDivider} />
         <View style={styles.orderTotalRow}>
           <Text style={styles.orderTotalLabel}>TOTAL</Text>
-          <Text style={styles.orderTotalAmount}>{formatCurrencyDisplay(totalPrice)}</Text>
+          <Text style={styles.orderTotalAmount}>{formatCurrencyDisplay(billing.totalAmount, billing.currencyCode)}</Text>
         </View>
 
         <View style={styles.orderDivider} />
@@ -7289,6 +8120,7 @@ export default function App() {
             <MenuScreen
               savedItems={savedItems}
               editableMenuItems={editableMenuItems}
+              currencyCode={selectedCurrencyCode}
               busy={busy}
               loading={menuLoading}
               onUpdateEditableMenuItem={updateEditableMenuItem}
@@ -7298,6 +8130,8 @@ export default function App() {
             />
           </View>
         ) : null}
+
+        {appMode === "admin" && activeTab === "billing" ? renderBillingTab() : null}
 
         {activeTab === "orders" ? (
           renderPosOrdersTab()

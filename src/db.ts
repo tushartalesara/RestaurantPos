@@ -1,10 +1,14 @@
 import type {
+  BillingConfig,
+  CountryTaxRate,
   MenuItemDraft,
   OrderCallReviewRecord,
+  RestaurantBillingConfig,
   RestaurantOrderRecord,
   RestaurantRecord,
   VoiceAgentLinkRecord,
 } from "./types"
+import { billingConfigToDraftBreakdown } from "./utils/billing"
 import { assertSupabaseConfigured, supabase } from "./supabase"
 
 function nowIso() {
@@ -90,6 +94,10 @@ function missingOrderPaymentMessage(): string {
   return "Order payment fields are missing. Run supabase/014_order_payment_settlement.sql in Supabase SQL Editor, then refresh the app."
 }
 
+function missingBillingConfigMessage(): string {
+  return "Billing configuration is missing. Run supabase/016_restaurant_billing_fields.sql, supabase/017_order_billing_fields.sql, and supabase/018_update_order_rpcs_billing.sql in Supabase SQL Editor, then refresh the app."
+}
+
 function normalizeOrderTrackingErrorMessage(message: string): string {
   const normalized = message.toLowerCase()
   if (normalized.includes("all 999 active order ids")) {
@@ -105,6 +113,31 @@ function normalizeOptionalString(value: unknown): string | null {
   if (typeof value !== "string") return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+function normalizeRequiredString(value: unknown, fallback = ""): string {
+  return normalizeOptionalString(value) || fallback
+}
+
+function normalizePositiveNumber(value: unknown): number {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseFloat(value)
+        : Number.NaN
+
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0
+}
+
+function normalizeNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((entry) => normalizePositiveNumber(entry))
+    .filter((entry, index, values) => Number.isFinite(entry) && values.indexOf(entry) === index)
 }
 
 function isMissingFunctionError(error: SupabaseQueryError | null | undefined, functionName: string): boolean {
@@ -148,7 +181,7 @@ export async function listRestaurants(ownerUserId: string): Promise<RestaurantRe
 
   const { data, error } = await supabase
     .from("restaurants")
-    .select("id, owner_user_id, name, phone, address, created_at, updated_at")
+    .select("id, owner_user_id, name, phone, address, country_code, currency_code, created_at, updated_at")
     .eq("owner_user_id", ownerUserId)
     .order("created_at", { ascending: false })
 
@@ -156,7 +189,17 @@ export async function listRestaurants(ownerUserId: string): Promise<RestaurantRe
     throw new Error(error.message)
   }
 
-  return (data || []) as RestaurantRecord[]
+  return (data || []).map((restaurant) => ({
+    id: String(restaurant.id),
+    owner_user_id: String(restaurant.owner_user_id),
+    name: String(restaurant.name || ""),
+    phone: normalizeOptionalString(restaurant.phone),
+    address: normalizeOptionalString(restaurant.address),
+    countryCode: normalizeRequiredString(restaurant.country_code, "GB"),
+    currencyCode: normalizeRequiredString(restaurant.currency_code, "GBP"),
+    created_at: String(restaurant.created_at || ""),
+    updated_at: String(restaurant.updated_at || ""),
+  }))
 }
 
 export async function saveRestaurant(input: {
@@ -376,6 +419,182 @@ export async function listRestaurantMenuItems(restaurantId: string): Promise<Men
   }))
 }
 
+export async function getCountryTaxRates(countryCode?: string | null): Promise<CountryTaxRate[]> {
+  assertSupabaseConfigured()
+
+  let query = supabase
+    .from("country_tax_rates")
+    .select("id, country_code, tax_name, rate_percent, is_default, effective_from, notes")
+    .order("is_default", { ascending: false })
+    .order("rate_percent", { ascending: true })
+    .order("effective_from", { ascending: false })
+
+  const normalizedCountryCode = normalizeOptionalString(countryCode)?.toUpperCase() || null
+  if (normalizedCountryCode) {
+    query = query.eq("country_code", normalizedCountryCode)
+  }
+
+  const { data, error } = await query
+
+  if (error) {
+    if (isMissingTableError(error, "country_tax_rates")) {
+      throw new Error(missingBillingConfigMessage())
+    }
+    throw new Error(error.message)
+  }
+
+  return (data || []).map((row) => ({
+    id: String(row.id),
+    countryCode: normalizeRequiredString(row.country_code, normalizedCountryCode || "GB"),
+    taxName: normalizeRequiredString(row.tax_name, "VAT"),
+    ratePercent: normalizePositiveNumber(row.rate_percent),
+    isDefault: Boolean(row.is_default),
+    effectiveFrom: normalizeRequiredString(row.effective_from, ""),
+    notes: normalizeOptionalString(row.notes),
+  }))
+}
+
+export async function getBillingConfig(restaurantId: string): Promise<BillingConfig> {
+  assertSupabaseConfigured()
+
+  const restaurantLookup = await supabase
+    .from("restaurants")
+    .select("id, country_code, currency_code")
+    .eq("id", restaurantId)
+    .single()
+
+  if (restaurantLookup.error) {
+    if (
+      isMissingColumnError(restaurantLookup.error, "restaurants", "country_code") ||
+      isMissingColumnError(restaurantLookup.error, "restaurants", "currency_code")
+    ) {
+      throw new Error(missingBillingConfigMessage())
+    }
+    throw new Error(restaurantLookup.error.message)
+  }
+
+  const countryCode = normalizeRequiredString(restaurantLookup.data.country_code, "GB")
+  const currencyCode = normalizeRequiredString(restaurantLookup.data.currency_code, "GBP")
+  const availableTaxRates = await getCountryTaxRates(countryCode)
+
+  const configLookup = await supabase
+    .from("restaurant_billing_config")
+    .select(
+      "id, restaurant_id, tax_rate_id, tax_rate_override, tax_inclusive, tax_label, service_fee_enabled, service_fee_type, service_fee_value, service_fee_label, tip_enabled, tip_suggestions, tip_label, updated_at",
+    )
+    .eq("restaurant_id", restaurantId)
+    .maybeSingle()
+
+  if (configLookup.error) {
+    if (isMissingTableError(configLookup.error, "restaurant_billing_config")) {
+      throw new Error(missingBillingConfigMessage())
+    }
+    throw new Error(configLookup.error.message)
+  }
+
+  const row = configLookup.data
+  const selectedTaxRate =
+    availableTaxRates.find((taxRate) => taxRate.id === normalizeOptionalString(row?.tax_rate_id)) ||
+    availableTaxRates.find((taxRate) => taxRate.isDefault) ||
+    availableTaxRates[0] ||
+    null
+  const taxLabel = normalizeOptionalString(row?.tax_label) || selectedTaxRate?.taxName || "VAT"
+  const resolvedTaxRatePercent =
+    normalizeOptionalString(String(row?.tax_rate_override ?? "")) !== null
+      ? normalizePositiveNumber(row?.tax_rate_override)
+      : selectedTaxRate?.ratePercent || 0
+
+  return {
+    id: normalizeOptionalString(row?.id) || undefined,
+    restaurantId,
+    countryCode,
+    currencyCode,
+    availableTaxRates,
+    taxRateId: normalizeOptionalString(row?.tax_rate_id),
+    taxRateOverride:
+      normalizeOptionalString(String(row?.tax_rate_override ?? "")) !== null
+        ? normalizePositiveNumber(row?.tax_rate_override)
+        : null,
+    resolvedTaxRatePercent,
+    taxInclusive: Boolean(row?.tax_inclusive),
+    taxLabel,
+    serviceFeeEnabled: Boolean(row?.service_fee_enabled),
+    serviceFeeType:
+      row?.service_fee_type === "flat" || row?.service_fee_type === "percent" ? row.service_fee_type : null,
+    serviceFeeValue: normalizePositiveNumber(row?.service_fee_value),
+    serviceFeeLabel: normalizeOptionalString(row?.service_fee_label) || "Service Charge",
+    tipEnabled: Boolean(row?.tip_enabled),
+    tipSuggestions:
+      normalizeNumberArray(row?.tip_suggestions).length > 0
+        ? normalizeNumberArray(row?.tip_suggestions)
+        : [10, 12.5, 15, 20],
+    tipLabel: normalizeOptionalString(row?.tip_label) || "Gratuity",
+    updatedAt: normalizeRequiredString(row?.updated_at, nowIso()),
+  }
+}
+
+export async function saveBillingConfig(input: BillingConfig | RestaurantBillingConfig & {
+  countryCode: string
+  currencyCode: string
+}): Promise<BillingConfig> {
+  assertSupabaseConfigured()
+
+  const normalizedCountryCode = normalizeRequiredString(input.countryCode, "GB").toUpperCase()
+  const normalizedCurrencyCode = normalizeRequiredString(input.currencyCode, "GBP").toUpperCase()
+
+  const restaurantUpdate = await supabase
+    .from("restaurants")
+    .update({
+      country_code: normalizedCountryCode,
+      currency_code: normalizedCurrencyCode,
+      updated_at: nowIso(),
+    })
+    .eq("id", input.restaurantId)
+    .select("id")
+    .single()
+
+  if (restaurantUpdate.error) {
+    if (
+      isMissingColumnError(restaurantUpdate.error, "restaurants", "country_code") ||
+      isMissingColumnError(restaurantUpdate.error, "restaurants", "currency_code")
+    ) {
+      throw new Error(missingBillingConfigMessage())
+    }
+    throw new Error(restaurantUpdate.error.message)
+  }
+
+  const { error } = await supabase
+    .from("restaurant_billing_config")
+    .upsert(
+      {
+        restaurant_id: input.restaurantId,
+        tax_rate_id: input.taxRateId || null,
+        tax_rate_override:
+          input.taxRateOverride === null || input.taxRateOverride === undefined ? null : normalizePositiveNumber(input.taxRateOverride),
+        tax_inclusive: Boolean(input.taxInclusive),
+        tax_label: normalizeRequiredString(input.taxLabel, "VAT"),
+        service_fee_enabled: Boolean(input.serviceFeeEnabled),
+        service_fee_type: input.serviceFeeEnabled ? input.serviceFeeType || null : null,
+        service_fee_value: input.serviceFeeEnabled ? normalizePositiveNumber(input.serviceFeeValue) : 0,
+        service_fee_label: normalizeRequiredString(input.serviceFeeLabel, "Service Charge"),
+        tip_enabled: Boolean(input.tipEnabled),
+        tip_suggestions: normalizeNumberArray(input.tipSuggestions).length > 0 ? normalizeNumberArray(input.tipSuggestions) : [10, 12.5, 15, 20],
+        tip_label: normalizeRequiredString(input.tipLabel, "Gratuity"),
+        updated_at: nowIso(),
+      },
+      { onConflict: "restaurant_id" },
+    )
+
+  if (error) {
+    if (isMissingTableError(error, "restaurant_billing_config")) {
+      throw new Error(missingBillingConfigMessage())
+    }
+    throw new Error(error.message)
+  }
+
+  return getBillingConfig(input.restaurantId)
+}
+
 function normalizeOrderStatus(value: unknown): "pending" | "closed" {
   return value === "closed" ? "closed" : "pending"
 }
@@ -424,7 +643,7 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
   const { data: orders, error: orderError } = await supabase
     .from("restaurant_orders")
     .select(
-      "id, restaurant_id, customer_name, customer_phone, fulfillment_type, delivery_postcode, delivery_address, payment_collection, payment_status, payment_method, card_transaction_id, short_order_code, order_code_date, status, notes, total_price, created_at, updated_at",
+      "id, restaurant_id, customer_name, customer_phone, fulfillment_type, delivery_postcode, delivery_address, payment_collection, payment_status, payment_method, card_transaction_id, short_order_code, order_code_date, status, notes, subtotal_amount, tax_amount, tax_rate_percent, tax_inclusive, tax_label, service_fee_amount, service_fee_label, tip_amount, tip_label, currency_code, total_price, created_at, updated_at",
     )
     .eq("restaurant_id", restaurantId)
     .order("created_at", { ascending: false })
@@ -454,6 +673,13 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
       isMissingColumnError(orderError, "restaurant_orders", "card_transaction_id")
     ) {
       throw new Error(missingOrderPaymentMessage())
+    }
+    if (
+      isMissingColumnError(orderError, "restaurant_orders", "subtotal_amount") ||
+      isMissingColumnError(orderError, "restaurant_orders", "tax_amount") ||
+      isMissingColumnError(orderError, "restaurant_orders", "currency_code")
+    ) {
+      throw new Error(missingBillingConfigMessage())
     }
     throw new Error(normalizeOrderTrackingErrorMessage(orderError.message))
   }
@@ -556,6 +782,16 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
     orderCodeDate: order.order_code_date === null ? null : String(order.order_code_date || ""),
     status: normalizeOrderStatus(order.status),
     notes: order.notes === null ? null : String(order.notes),
+    subtotalAmount: normalizePositiveNumber(order.subtotal_amount),
+    taxAmount: normalizePositiveNumber(order.tax_amount),
+    taxRatePercent: normalizePositiveNumber(order.tax_rate_percent),
+    taxInclusive: Boolean(order.tax_inclusive),
+    taxLabel: normalizeRequiredString(order.tax_label, "VAT"),
+    serviceFeeAmount: normalizePositiveNumber(order.service_fee_amount),
+    serviceFeeLabel: normalizeRequiredString(order.service_fee_label, "Service Charge"),
+    tipAmount: normalizePositiveNumber(order.tip_amount),
+    tipLabel: normalizeRequiredString(order.tip_label, "Gratuity"),
+    currencyCode: normalizeRequiredString(order.currency_code, "GBP"),
     totalPrice: Number(order.total_price || 0),
     items: groupedItems.get(String(order.id)) || [],
     callReview: callReviewsByOrderId.get(String(order.id)) || null,
@@ -580,7 +816,7 @@ export async function saveRestaurantOrder(input: {
   assertSupabaseConfigured()
 
   const sanitizedItems = sanitizeOrderItems(input.items)
-  const totalPrice = sanitizedItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
+  const subtotalAmount = sanitizedItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
   const canUseAtomicStockSync = sanitizedItems.length > 0 && sanitizedItems.every((item) => Boolean(item.menuItemId))
   const fulfillmentType = normalizeFulfillmentType(input.fulfillmentType)
   const paymentCollection = normalizePaymentCollection(input.paymentCollection, fulfillmentType)
@@ -622,6 +858,13 @@ export async function saveRestaurantOrder(input: {
       ) {
         throw new Error(missingOrderFulfillmentMessage())
       }
+      if (
+        isMissingColumnError(error, "restaurant_orders", "subtotal_amount") ||
+        isMissingColumnError(error, "restaurant_orders", "tax_amount") ||
+        isMissingColumnError(error, "restaurant_orders", "currency_code")
+      ) {
+        throw new Error(missingBillingConfigMessage())
+      }
       throw new Error(normalizeOrderTrackingErrorMessage(error.message || "Failed to save order with stock sync"))
     }
 
@@ -633,6 +876,34 @@ export async function saveRestaurantOrder(input: {
 
     return resolvedOrderId
   }
+
+  const billingConfig = await getBillingConfig(input.restaurantId)
+  let existingTipAmount = 0
+  let existingTipLabel = billingConfig.tipLabel || "Gratuity"
+
+  if (input.orderId) {
+    const existingBillingLookup = await supabase
+      .from("restaurant_orders")
+      .select("tip_amount, tip_label")
+      .eq("id", input.orderId)
+      .eq("restaurant_id", input.restaurantId)
+      .maybeSingle()
+
+    if (existingBillingLookup.error) {
+      if (
+        isMissingColumnError(existingBillingLookup.error, "restaurant_orders", "tip_amount") ||
+        isMissingColumnError(existingBillingLookup.error, "restaurant_orders", "tip_label")
+      ) {
+        throw new Error(missingBillingConfigMessage())
+      }
+      throw new Error(existingBillingLookup.error.message)
+    }
+
+    existingTipAmount = normalizePositiveNumber(existingBillingLookup.data?.tip_amount)
+    existingTipLabel = normalizeOptionalString(existingBillingLookup.data?.tip_label) || existingTipLabel
+  }
+
+  const billingBreakdown = billingConfigToDraftBreakdown(billingConfig, subtotalAmount, existingTipAmount)
 
   if (input.orderId) {
     const { error: updateError } = await supabase
@@ -646,7 +917,17 @@ export async function saveRestaurantOrder(input: {
         payment_collection: paymentCollection,
         status: input.status || "pending",
         notes: input.notes || null,
-        total_price: totalPrice,
+        subtotal_amount: billingBreakdown.subtotalAmount,
+        tax_amount: billingBreakdown.taxAmount,
+        tax_rate_percent: billingBreakdown.taxRatePercent,
+        tax_inclusive: billingBreakdown.taxInclusive,
+        tax_label: billingBreakdown.taxLabel,
+        service_fee_amount: billingBreakdown.serviceFeeAmount,
+        service_fee_label: billingBreakdown.serviceFeeLabel,
+        tip_amount: billingBreakdown.tipAmount,
+        tip_label: existingTipLabel,
+        currency_code: billingBreakdown.currencyCode,
+        total_price: billingBreakdown.totalAmount,
         updated_at: nowIso(),
       })
       .eq("id", input.orderId)
@@ -666,6 +947,13 @@ export async function saveRestaurantOrder(input: {
         isMissingColumnError(updateError, "restaurant_orders", "payment_collection")
       ) {
         throw new Error(missingOrderFulfillmentMessage())
+      }
+      if (
+        isMissingColumnError(updateError, "restaurant_orders", "subtotal_amount") ||
+        isMissingColumnError(updateError, "restaurant_orders", "tax_amount") ||
+        isMissingColumnError(updateError, "restaurant_orders", "currency_code")
+      ) {
+        throw new Error(missingBillingConfigMessage())
       }
       throw new Error(normalizeOrderTrackingErrorMessage(updateError.message))
     }
@@ -727,7 +1015,17 @@ export async function saveRestaurantOrder(input: {
       payment_collection: paymentCollection,
       status: input.status || "pending",
       notes: input.notes || null,
-      total_price: totalPrice,
+      subtotal_amount: billingBreakdown.subtotalAmount,
+      tax_amount: billingBreakdown.taxAmount,
+      tax_rate_percent: billingBreakdown.taxRatePercent,
+      tax_inclusive: billingBreakdown.taxInclusive,
+      tax_label: billingBreakdown.taxLabel,
+      service_fee_amount: billingBreakdown.serviceFeeAmount,
+      service_fee_label: billingBreakdown.serviceFeeLabel,
+      tip_amount: billingBreakdown.tipAmount,
+      tip_label: existingTipLabel,
+      currency_code: billingBreakdown.currencyCode,
+      total_price: billingBreakdown.totalAmount,
       updated_at: nowIso(),
     })
     .select("id")
@@ -747,6 +1045,13 @@ export async function saveRestaurantOrder(input: {
       isMissingColumnError(insertOrderError, "restaurant_orders", "payment_collection")
     ) {
       throw new Error(missingOrderFulfillmentMessage())
+    }
+    if (
+      isMissingColumnError(insertOrderError, "restaurant_orders", "subtotal_amount") ||
+      isMissingColumnError(insertOrderError, "restaurant_orders", "tax_amount") ||
+      isMissingColumnError(insertOrderError, "restaurant_orders", "currency_code")
+    ) {
+      throw new Error(missingBillingConfigMessage())
     }
     throw new Error(normalizeOrderTrackingErrorMessage(insertOrderError.message))
   }
@@ -795,6 +1100,7 @@ export async function updateRestaurantOrderPayment(input: {
   paymentStatus: "unpaid" | "paid"
   paymentMethod?: "cash" | "card" | null
   cardTransactionId?: string | null
+  tipAmount?: number | null
 }) {
   assertSupabaseConfigured()
 
@@ -804,6 +1110,7 @@ export async function updateRestaurantOrderPayment(input: {
     payment_status?: string | null
     payment_method?: string | null
     card_transaction_id?: string | null
+    tip_amount?: number | null
     error?: string
     remediation?: string
   }>("update-order-payment-status", {
@@ -814,6 +1121,7 @@ export async function updateRestaurantOrderPayment(input: {
       payment_status: input.paymentStatus,
       payment_method: input.paymentStatus === "paid" ? input.paymentMethod || null : null,
       card_transaction_id: input.paymentStatus === "paid" ? input.cardTransactionId || null : null,
+      tip_amount: input.paymentStatus === "paid" ? normalizePositiveNumber(input.tipAmount) : 0,
     },
   })
 
@@ -832,6 +1140,7 @@ export async function updateRestaurantOrderPayment(input: {
     paymentStatus: normalizePaymentStatus(data.payment_status || input.paymentStatus),
     paymentMethod: normalizePaymentMethod(data.payment_method),
     cardTransactionId: normalizeOptionalString(data.card_transaction_id),
+    tipAmount: normalizePositiveNumber(data.tip_amount),
   }
 }
 

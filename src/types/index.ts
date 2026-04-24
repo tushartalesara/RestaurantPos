@@ -13,6 +13,8 @@ export interface RestaurantRecord {
   name: string
   phone: string | null
   address: string | null
+  countryCode: string
+  currencyCode: string
   created_at: string
   updated_at: string
 }
@@ -70,6 +72,41 @@ export type FulfillmentType = "pickup" | "delivery"
 export type PaymentCollection = "unpaid" | "cod"
 export type PaymentStatus = "unpaid" | "paid"
 export type PaymentMethod = "cash" | "card"
+export type ServiceFeeType = "percent" | "flat"
+
+export interface CountryTaxRate {
+  id: string
+  countryCode: string
+  taxName: string
+  ratePercent: number
+  isDefault: boolean
+  effectiveFrom: string
+  notes?: string | null
+}
+
+export interface RestaurantBillingConfig {
+  id?: string
+  restaurantId: string
+  taxRateId?: string | null
+  taxRateOverride?: number | null
+  taxInclusive: boolean
+  taxLabel: string
+  serviceFeeEnabled: boolean
+  serviceFeeType?: ServiceFeeType | null
+  serviceFeeValue: number
+  serviceFeeLabel: string
+  tipEnabled: boolean
+  tipSuggestions: number[]
+  tipLabel: string
+  updatedAt?: string
+}
+
+export interface BillingConfig extends RestaurantBillingConfig {
+  countryCode: string
+  currencyCode: string
+  availableTaxRates: CountryTaxRate[]
+  resolvedTaxRatePercent: number
+}
 
 export interface RestaurantOrderRecord {
   id?: string
@@ -87,6 +124,16 @@ export interface RestaurantOrderRecord {
   orderCodeDate?: string | null
   status: "pending" | "closed"
   notes?: string | null
+  subtotalAmount: number
+  taxAmount: number
+  taxRatePercent: number
+  taxInclusive: boolean
+  taxLabel: string
+  serviceFeeAmount: number
+  serviceFeeLabel: string
+  tipAmount: number
+  tipLabel: string
+  currencyCode: string
   totalPrice: number
   items: RestaurantOrderItemRecord[]
   callReview?: OrderCallReviewRecord | null
@@ -119,11 +166,21 @@ export type UiOrderDraft = {
   createdAt?: string | null
   status: "pending" | "closed"
   notes: string
+  subtotalAmount: number
+  taxAmount: number
+  taxRatePercent: number
+  taxInclusive: boolean
+  taxLabel: string
+  serviceFeeAmount: number
+  serviceFeeLabel: string
+  tipAmount: number
+  tipLabel: string
+  currencyCode: string
   itemsText: string
   callReview?: RestaurantOrderRecord["callReview"]
 }
 
-export type MainTab = "overview" | "menu" | "orders" | "voice" | "summary"
+export type MainTab = "overview" | "billing" | "menu" | "orders" | "voice" | "summary"
 export type AppMode = "admin" | "pos"
 export type AuthMode = "login" | "register" | "reset"
 export type ParseInsertMode = "replace" | "prepend" | "append"
@@ -163,6 +220,16 @@ export type ReceiptOrder = {
   card_transaction_id?: string | null
   notes?: string | null
   special_instructions?: string | null
+  subtotal_amount?: number | string | null
+  tax_amount?: number | string | null
+  tax_rate_percent?: number | string | null
+  tax_inclusive?: boolean | null
+  tax_label?: string | null
+  service_fee_amount?: number | string | null
+  service_fee_label?: string | null
+  tip_amount?: number | string | null
+  tip_label?: string | null
+  currency_code?: string | null
   total_amount?: number | string | null
   total?: number | string | null
   items?: ReceiptLineItem[]

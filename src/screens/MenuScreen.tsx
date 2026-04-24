@@ -29,6 +29,7 @@ const WEB_TEXT_INPUT_RESET = (Platform.OS === "web"
 type MenuScreenProps = {
   savedItems: MenuItemDraft[]
   editableMenuItems: UiDraftItem[]
+  currencyCode: string
   busy: boolean
   loading: boolean
   onUpdateEditableMenuItem: (index: number, patch: Partial<UiDraftItem>) => void
@@ -48,6 +49,7 @@ type MenuRow =
 
 type SavedMenuItemCardProps = {
   item: MenuItemDraft
+  currencyCode: string
 }
 
 type LabeledInputProps = {
@@ -83,7 +85,7 @@ function LabeledInput({
   )
 }
 
-const SavedMenuItemCard = memo(function SavedMenuItemCard({ item }: SavedMenuItemCardProps) {
+const SavedMenuItemCard = memo(function SavedMenuItemCard({ item, currencyCode }: SavedMenuItemCardProps) {
   const optionsText = (item.customizations || [])
     .map((customization) =>
       customization.priceDelta ? `${customization.label}+${customization.priceDelta}` : customization.label,
@@ -93,7 +95,7 @@ const SavedMenuItemCard = memo(function SavedMenuItemCard({ item }: SavedMenuIte
   return (
     <View style={styles.savedCard}>
       <Text style={styles.savedName}>
-        {item.name} - {formatCurrencyDisplay(item.basePrice)}
+        {item.name} - {formatCurrencyDisplay(item.basePrice, currencyCode)}
       </Text>
       {item.description ? (
         <Text style={styles.savedMeta}>
@@ -195,6 +197,7 @@ function MenuSkeletonCard() {
 export function MenuScreen({
   savedItems,
   editableMenuItems,
+  currencyCode,
   busy,
   loading,
   onUpdateEditableMenuItem,
@@ -244,7 +247,7 @@ export function MenuScreen({
         case "savedEmpty":
           return <Text style={styles.emptyText}>No saved items yet.</Text>
         case "savedItem":
-          return <SavedMenuItemCard item={item.item} />
+          return <SavedMenuItemCard item={item.item} currencyCode={currencyCode} />
         case "editHeader":
           return <Text style={styles.sectionTitle}>Edit Menu (Including Prices)</Text>
         case "editEmpty":
@@ -273,7 +276,7 @@ export function MenuScreen({
           return null
       }
     },
-    [busy, onAddEditableMenuItem, onRemoveEditableMenuItem, onSaveEditedMenu, onUpdateEditableMenuItem],
+    [busy, currencyCode, onAddEditableMenuItem, onRemoveEditableMenuItem, onSaveEditedMenu, onUpdateEditableMenuItem],
   )
 
   if (loading) {

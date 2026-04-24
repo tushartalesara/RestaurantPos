@@ -34,6 +34,23 @@ function normalizePaymentMethod(value: unknown): "cash" | "card" | null {
   return null
 }
 
+function normalizePositiveNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, value)
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value)
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, parsed)
+    }
+  }
+  return 0
+}
+
+function roundMoney(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100
+}
+
 function resolvePaymentPin(): string {
   return (
     normalizeString(Deno.env.get("MOBILE_ONBOARDING_ORDER_PAYMENT_PIN")) ||
@@ -111,6 +128,7 @@ serve(async (request) => {
   const paymentStatus = normalizePaymentStatus(bodyObj.payment_status)
   const paymentMethod = normalizePaymentMethod(bodyObj.payment_method)
   const cardTransactionId = normalizeString(bodyObj.card_transaction_id)
+  const tipAmount = roundMoney(normalizePositiveNumber(bodyObj.tip_amount))
 
   if (!restaurantId) {
     return jsonResponse(400, { error: "restaurant_id is required." })
@@ -146,18 +164,83 @@ serve(async (request) => {
     return jsonResponse(403, { error: "You do not have access to this restaurant." })
   }
 
+  const orderLookup = await supabase
+    .from("restaurant_orders")
+    .select("id, subtotal_amount, tax_amount, tax_inclusive, service_fee_amount, tip_label")
+    .eq("id", orderId)
+    .eq("restaurant_id", restaurantId)
+    .maybeSingle()
+
+  if (orderLookup.error) {
+    const message = normalizeString(orderLookup.error.message)
+    const lower = message.toLowerCase()
+
+    if (
+      lower.includes("subtotal_amount") ||
+      lower.includes("tax_amount") ||
+      lower.includes("service_fee_amount") ||
+      lower.includes("tip_label")
+    ) {
+      return jsonResponse(500, {
+        error: message || "Order billing fields are missing.",
+        remediation:
+          "Run supabase/016_restaurant_billing_fields.sql, supabase/017_order_billing_fields.sql, and supabase/018_update_order_rpcs_billing.sql in Supabase SQL Editor, then retry.",
+      })
+    }
+
+    return jsonResponse(500, { error: message || "Failed to load order billing." })
+  }
+
+  if (!orderLookup.data?.id) {
+    return jsonResponse(404, { error: "Order not found for this restaurant." })
+  }
+
+  const billingConfigLookup = await supabase
+    .from("restaurant_billing_config")
+    .select("tip_label")
+    .eq("restaurant_id", restaurantId)
+    .maybeSingle()
+
+  if (billingConfigLookup.error) {
+    const message = normalizeString(billingConfigLookup.error.message)
+    const lower = message.toLowerCase()
+
+    if (lower.includes("restaurant_billing_config")) {
+      return jsonResponse(500, {
+        error: message || "Billing configuration is missing.",
+        remediation:
+          "Run supabase/016_restaurant_billing_fields.sql, supabase/017_order_billing_fields.sql, and supabase/018_update_order_rpcs_billing.sql in Supabase SQL Editor, then retry.",
+      })
+    }
+  }
+
+  const subtotalAmount = normalizePositiveNumber(orderLookup.data.subtotal_amount)
+  const taxAmount = normalizePositiveNumber(orderLookup.data.tax_amount)
+  const taxInclusive = Boolean(orderLookup.data.tax_inclusive)
+  const serviceFeeAmount = normalizePositiveNumber(orderLookup.data.service_fee_amount)
+  const nextTipAmount = paymentStatus === "paid" ? tipAmount : 0
+  const totalBeforeTip = roundMoney(subtotalAmount + serviceFeeAmount + (taxInclusive ? 0 : taxAmount))
+  const nextTotalPrice = roundMoney(totalBeforeTip + nextTipAmount)
+  const tipLabel =
+    normalizeString(billingConfigLookup.data?.tip_label) ||
+    normalizeString(orderLookup.data.tip_label) ||
+    "Gratuity"
+
   const updateResult = await supabase
     .from("restaurant_orders")
     .update({
       payment_status: paymentStatus,
       payment_method: paymentStatus === "paid" ? paymentMethod : null,
       card_transaction_id: paymentStatus === "paid" && paymentMethod === "card" ? cardTransactionId || null : null,
+      tip_amount: nextTipAmount,
+      tip_label: tipLabel,
+      total_price: nextTotalPrice,
       payment_updated_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
     .eq("id", orderId)
     .eq("restaurant_id", restaurantId)
-    .select("id, payment_status, payment_method, card_transaction_id")
+    .select("id, payment_status, payment_method, card_transaction_id, tip_amount")
     .maybeSingle()
 
   if (updateResult.error) {
@@ -174,12 +257,20 @@ serve(async (request) => {
         remediation: "Run supabase/014_order_payment_settlement.sql in Supabase SQL Editor, then retry.",
       })
     }
+    if (
+      lower.includes("tip_amount") ||
+      lower.includes("tip_label") ||
+      lower.includes("subtotal_amount") ||
+      lower.includes("service_fee_amount")
+    ) {
+      return jsonResponse(500, {
+        error: message || "Order billing fields are missing.",
+        remediation:
+          "Run supabase/016_restaurant_billing_fields.sql, supabase/017_order_billing_fields.sql, and supabase/018_update_order_rpcs_billing.sql in Supabase SQL Editor, then retry.",
+      })
+    }
 
     return jsonResponse(500, { error: message || "Failed to update order payment." })
-  }
-
-  if (!updateResult.data?.id) {
-    return jsonResponse(404, { error: "Order not found for this restaurant." })
   }
 
   return jsonResponse(200, {
@@ -188,5 +279,6 @@ serve(async (request) => {
     payment_status: normalizeString(updateResult.data.payment_status) || paymentStatus,
     payment_method: normalizeString(updateResult.data.payment_method) || null,
     card_transaction_id: normalizeString(updateResult.data.card_transaction_id) || null,
+    tip_amount: normalizePositiveNumber(updateResult.data.tip_amount),
   })
 })

@@ -1,20 +1,21 @@
 import { Platform } from "react-native"
 import * as Print from "expo-print"
 import type { ReceiptOrder } from "../types"
+import { normalizeOrderBillingBreakdown } from "./billing"
 import {
   escapeReceiptHtml,
   formatReceiptDate,
+  getCurrencySymbol,
   getFulfillmentTypeLabel,
   getOrderPaymentDisplayLabel,
   getReceiptNumericString,
   normalizeUkPostcode,
 } from "./formatters"
 
-const HTML_CURRENCY_ENTITY = "&pound;"
-
 type DaySummarySnapshot = {
   reportDateLabel: string
   printedAtLabel: string
+  currencyCode: string
   totalOrders: number
   pendingOrders: number
   completedOrders: number
@@ -26,7 +27,8 @@ type DaySummarySnapshot = {
 }
 
 function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): string {
-  const itemRows = (order.items || order.order_items || [])
+  const items = order.items || order.order_items || []
+  const itemRows = items
     .map((item) => {
       const name = escapeReceiptHtml(String(item.name || item.item_name || "").toUpperCase())
       const quantity = escapeReceiptHtml(String(item.quantity || item.qty || 1))
@@ -35,13 +37,18 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
         <tr>
           <td class="desc">${name}</td>
           <td class="qty">${quantity}</td>
-          <td class="price">${HTML_CURRENCY_ENTITY}${price}</td>
+          <td class="price">${escapeReceiptHtml(getCurrencySymbol(order.currency_code))}${price}</td>
         </tr>
       `
     })
     .join("")
 
-  const total = getReceiptNumericString(order.total_amount || order.total || 0)
+  const fallbackSubtotalAmount = items.reduce(
+    (sum, item) => sum + Number(getReceiptNumericString(item.price || item.unit_price || 0)),
+    0,
+  )
+  const billing = normalizeOrderBillingBreakdown(order, { fallbackSubtotalAmount })
+  const currencySymbol = escapeReceiptHtml(getCurrencySymbol(billing.currencyCode))
   const orderCode = escapeReceiptHtml(String(order.short_code || order.id || ""))
   const customerName = escapeReceiptHtml(String(order.customer_name || order.contact_name || "Guest"))
   const phone = escapeReceiptHtml(String(order.customer_phone || order.contact_phone || "").trim())
@@ -110,9 +117,37 @@ function getReceiptBodyMarkup(order: ReceiptOrder, restaurantName: string): stri
     </table>
     <div class="divider divider-solid">================================</div>
 
+    <div class="summary-row">
+      <span>Subtotal</span>
+      <span>${currencySymbol}${getReceiptNumericString(billing.subtotalAmount)}</span>
+    </div>
+    ${
+      billing.taxAmount > 0
+        ? `<div class="summary-row"><span>${escapeReceiptHtml(billing.taxLabel)}${
+            billing.taxRatePercent > 0 ? ` (${escapeReceiptHtml(billing.taxRatePercent.toFixed(2))}%)` : ""
+          }</span><span>${currencySymbol}${getReceiptNumericString(billing.taxAmount)}</span></div>`
+        : ""
+    }
+    ${
+      billing.serviceFeeAmount > 0
+        ? `<div class="summary-row"><span>${escapeReceiptHtml(
+            billing.serviceFeeLabel,
+          )}</span><span>${currencySymbol}${getReceiptNumericString(billing.serviceFeeAmount)}</span></div>`
+        : ""
+    }
+    ${
+      billing.tipAmount > 0
+        ? `<div class="summary-row"><span>Total before tip</span><span>${currencySymbol}${getReceiptNumericString(
+            billing.totalBeforeTip,
+          )}</span></div>
+           <div class="summary-row"><span>${escapeReceiptHtml(billing.tipLabel)}</span><span>${currencySymbol}${getReceiptNumericString(
+            billing.tipAmount,
+          )}</span></div>`
+        : ""
+    }
     <div class="total-row">
       <span>TOTAL</span>
-      <span>${HTML_CURRENCY_ENTITY}${total}</span>
+      <span>${currencySymbol}${getReceiptNumericString(billing.totalAmount)}</span>
     </div>
     <div class="divider">--------------------------------</div>
 
@@ -237,6 +272,13 @@ function getReceiptStyles(paperWidth: "58mm" | "80mm" = "80mm"): string {
       font-weight: bold;
       padding: 4px 0 2px 0;
     }
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 11px;
+      padding: 2px 0;
+    }
     .footer {
       text-align: center;
       font-size: 10px;
@@ -305,16 +347,17 @@ export function generateDaySummaryHTML(
   const reportDateLabel = escapeReceiptHtml(summary.reportDateLabel)
   const printedAtLabel = escapeReceiptHtml(summary.printedAtLabel)
   const outstandingTotal = summary.codOutstandingTotal + summary.unpaidOutstandingTotal
+  const currencySymbol = getCurrencySymbol(summary.currencyCode)
   const rows = [
     { label: "Total Orders", value: String(summary.totalOrders) },
     { label: "Pending", value: String(summary.pendingOrders) },
     { label: "Completed", value: String(summary.completedOrders) },
-    { label: "Gross Sales", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.grossTotal)}` },
-    { label: "Cash", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.cashTotal)}` },
-    { label: "Credit", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.creditTotal)}` },
-    { label: "COD Outstanding", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.codOutstandingTotal)}` },
-    { label: "Unpaid Outstanding", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(summary.unpaidOutstandingTotal)}` },
-    { label: "Outstanding Total", value: `${HTML_CURRENCY_ENTITY}${getReceiptNumericString(outstandingTotal)}` },
+    { label: "Gross Sales", value: `${currencySymbol}${getReceiptNumericString(summary.grossTotal)}` },
+    { label: "Cash", value: `${currencySymbol}${getReceiptNumericString(summary.cashTotal)}` },
+    { label: "Card", value: `${currencySymbol}${getReceiptNumericString(summary.creditTotal)}` },
+    { label: "COD Outstanding", value: `${currencySymbol}${getReceiptNumericString(summary.codOutstandingTotal)}` },
+    { label: "Unpaid Outstanding", value: `${currencySymbol}${getReceiptNumericString(summary.unpaidOutstandingTotal)}` },
+    { label: "Outstanding Total", value: `${currencySymbol}${getReceiptNumericString(outstandingTotal)}` },
   ]
 
   const rowMarkup = rows

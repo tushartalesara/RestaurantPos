@@ -17,6 +17,7 @@ const TOOL_NAMES = {
   getItemCustomizations: "mobile_onboarding_get_item_customizations",
   checkItemStock: "mobile_onboarding_check_item_stock",
   lookupUkPostcodeAddresses: "mobile_onboarding_lookup_uk_postcode_addresses",
+  getOrderQuote: "mobile_onboarding_get_order_quote",
   placeOrderAtomic: "mobile_onboarding_place_order_atomic",
 } as const
 
@@ -91,7 +92,8 @@ function buildRestaurantPrompt(params: { agentName: string; address?: string; ph
     `2) ${TOOL_NAMES.getItemCustomizations}`,
     `3) ${TOOL_NAMES.checkItemStock}`,
     `4) ${TOOL_NAMES.lookupUkPostcodeAddresses}`,
-    `5) ${TOOL_NAMES.placeOrderAtomic}`,
+    `5) ${TOOL_NAMES.getOrderQuote}`,
+    `6) ${TOOL_NAMES.placeOrderAtomic}`,
     ``,
     `CORE RULES`,
     `- Always pass agent_id as {{system__agent_id}} in tool calls.`,
@@ -103,6 +105,8 @@ function buildRestaurantPrompt(params: { agentName: string; address?: string; ph
     `- Never ask the caller to dictate the full delivery address before you have done the postcode lookup.`,
     `- Pickup orders must be sent as fulfillment_type=pickup and payment_collection=unpaid.`,
     `- Delivery orders must be sent as fulfillment_type=delivery and payment_collection=cod.`,
+    `- Always call ${TOOL_NAMES.getOrderQuote} after the cart is finalized and before the final yes/no confirmation.`,
+    `- Quote the final payable amount returned by ${TOOL_NAMES.getOrderQuote}. For tax-inclusive menus, make it clear the total already includes tax. For tax-exclusive menus, make it clear the returned total includes tax added on top.`,
     `- Never place an order without explicit customer confirmation.`,
     `- Never claim the order is placed unless ${TOOL_NAMES.placeOrderAtomic} succeeds.`,
     `- Speak naturally and keep replies concise.`,
@@ -117,7 +121,8 @@ function buildRestaurantPrompt(params: { agentName: string; address?: string; ph
     `- If an exact item is resolved, call ${TOOL_NAMES.getItemCustomizations} before final confirmation.`,
     `- For delivery, collect the postcode, call ${TOOL_NAMES.lookupUkPostcodeAddresses}, and let the caller choose one returned address.`,
     `- If the postcode lookup returns no results, ask for a different postcode or offer pickup instead.`,
-    `- Summarize the cart, fulfilment type, payment collection, and delivery address when relevant, then ask if you should place the order now.`,
+    `- Once the cart is finalized, call ${TOOL_NAMES.getOrderQuote} with the confirmed items and fulfilment type.`,
+    `- Summarize the cart, fulfilment type, payment collection, delivery address when relevant, and the final total including tax before asking if you should place the order now.`,
     `- On yes, call ${TOOL_NAMES.placeOrderAtomic} with customer details, fulfillment_type, payment_collection, notes if any, and the final items.`,
     `- Share the 3-digit order code and total price after a successful order.`,
   ].join("\n")
@@ -234,6 +239,47 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}} when available." },
             postcode: { type: "string", description: "The UK delivery postcode provided by the caller." },
+          },
+        },
+      },
+    },
+    {
+      type: "webhook",
+      name: TOOL_NAMES.getOrderQuote,
+      description:
+        "Quote the final payable order total before placement. Use this after the final items are confirmed so you can read back the total including tax and fees before asking for final order confirmation.",
+      response_timeout_secs: 20,
+      disable_interruptions: false,
+      force_pre_tool_speech: false,
+      api_schema: {
+        url: `${params.functionsBaseUrl}/get-order-quote`,
+        method: "POST",
+        request_headers: requestHeaders,
+        request_body_schema: {
+          type: "object",
+          required: ["agent_id", "conversation_id", "fulfillment_type", "items"],
+          properties: {
+            agent_id: { type: "string", description: "Use {{system__agent_id}}." },
+            conversation_id: { type: "string", description: "Use {{system__conversation_id}}." },
+            fulfillment_type: {
+              type: "string",
+              description: "Use pickup for collection orders or delivery for address orders.",
+              enum: ["pickup", "delivery"],
+            },
+            items: {
+              type: "array",
+              description: "The final confirmed cart lines to price.",
+              items: {
+                type: "object",
+                required: ["item_id", "quantity"],
+                properties: {
+                  item_id: { type: "string", description: "Exact menu item id from earlier tool results." },
+                  quantity: { type: "number", description: "Confirmed quantity for this item." },
+                  name: { type: "string", description: "Optional display name for the item." },
+                  unit_price: { type: "number", description: "Optional unit price override. Usually omit." },
+                },
+              },
+            },
           },
         },
       },

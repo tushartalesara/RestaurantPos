@@ -1,6 +1,7 @@
 import React from "react"
 import { Platform, StyleSheet, Text, View } from "react-native"
 import type { ReceiptOrder } from "../types"
+import { normalizeOrderBillingBreakdown } from "./billing"
 import {
   formatCurrencyDisplay,
   formatReceiptDate,
@@ -22,7 +23,11 @@ export function ReceiptContent({ order, restaurantName }: ReceiptContentProps) {
   }
 
   const items = order?.items || order?.order_items || []
-  const total = formatCurrencyDisplay(Number(getReceiptNumericString(order?.total_amount || order?.total || 0)))
+  const fallbackSubtotalAmount = items.reduce(
+    (sum, item) => sum + Number(getReceiptNumericString(item.price || item.unit_price || 0)),
+    0,
+  )
+  const billing = normalizeOrderBillingBreakdown(order, { fallbackSubtotalAmount })
   const customerName = String(order?.customer_name || order?.contact_name || "Guest")
   const customerPhone = String(order?.customer_phone || order?.contact_phone || "").trim()
   const fulfillmentType = getFulfillmentTypeLabel(order?.fulfillment_type)
@@ -87,7 +92,42 @@ export function ReceiptContent({ order, restaurantName }: ReceiptContentProps) {
 
       <View style={styles.solidDivider} />
 
-      <Text style={styles.totalText}>TOTAL {total}</Text>
+      <View style={styles.totalStack}>
+        <View style={styles.totalRow}>
+          <Text style={styles.totalLabel}>SUBTOTAL</Text>
+          <Text style={styles.totalAmount}>{formatCurrencyDisplay(billing.subtotalAmount, billing.currencyCode)}</Text>
+        </View>
+        {billing.taxAmount > 0 ? (
+          <View style={styles.totalRow}>
+            <Text style={styles.totalLabel}>
+              {billing.taxLabel.toUpperCase()} {billing.taxRatePercent > 0 ? `(${billing.taxRatePercent.toFixed(2)}%)` : ""}
+            </Text>
+            <Text style={styles.totalAmount}>{formatCurrencyDisplay(billing.taxAmount, billing.currencyCode)}</Text>
+          </View>
+        ) : null}
+        {billing.serviceFeeAmount > 0 ? (
+          <View style={styles.totalRow}>
+            <Text style={styles.totalLabel}>{billing.serviceFeeLabel.toUpperCase()}</Text>
+            <Text style={styles.totalAmount}>{formatCurrencyDisplay(billing.serviceFeeAmount, billing.currencyCode)}</Text>
+          </View>
+        ) : null}
+        {billing.tipAmount > 0 ? (
+          <>
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>TOTAL BEFORE TIP</Text>
+              <Text style={styles.totalAmount}>{formatCurrencyDisplay(billing.totalBeforeTip, billing.currencyCode)}</Text>
+            </View>
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>{billing.tipLabel.toUpperCase()}</Text>
+              <Text style={styles.totalAmount}>{formatCurrencyDisplay(billing.tipAmount, billing.currencyCode)}</Text>
+            </View>
+          </>
+        ) : null}
+        <View style={[styles.totalRow, styles.totalRowStrong]}>
+          <Text style={styles.totalText}>TOTAL</Text>
+          <Text style={styles.totalText}>{formatCurrencyDisplay(billing.totalAmount, billing.currencyCode)}</Text>
+        </View>
+      </View>
 
       <View style={styles.solidDivider} />
 
@@ -208,11 +248,35 @@ const styles = StyleSheet.create({
     textAlign: "right",
     fontFamily: RECEIPT_FONT,
   },
+  totalStack: {
+    gap: 6,
+  },
+  totalRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  totalRowStrong: {
+    paddingTop: 4,
+  },
+  totalLabel: {
+    color: "#1A1A1A",
+    fontSize: 12,
+    fontWeight: "700",
+    fontFamily: RECEIPT_FONT,
+    flex: 1,
+  },
+  totalAmount: {
+    color: "#1A1A1A",
+    fontSize: 12,
+    textAlign: "right",
+    fontFamily: RECEIPT_FONT,
+  },
   totalText: {
     color: "#1A1A1A",
     fontSize: 16,
     fontWeight: "800",
-    textAlign: "right",
     fontFamily: RECEIPT_FONT,
   },
   footerTitle: {

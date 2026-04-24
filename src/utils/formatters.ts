@@ -1,14 +1,35 @@
 import { ReceiptOrder } from "../types"
 
-const CURRENCY_SYMBOL = "\u00A3"
+const DEFAULT_CURRENCY_CODE = "GBP"
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  GBP: "\u00A3",
+  USD: "$",
+  EUR: "\u20AC",
+  INR: "\u20B9",
+  AED: "AED ",
+  AUD: "A$",
+  CAD: "C$",
+}
+
+export function getCurrencySymbol(currencyCode: string | null | undefined): string {
+  const normalizedCurrencyCode = String(currencyCode || "")
+    .trim()
+    .toUpperCase()
+
+  if (!normalizedCurrencyCode) {
+    return CURRENCY_SYMBOLS[DEFAULT_CURRENCY_CODE]
+  }
+
+  return CURRENCY_SYMBOLS[normalizedCurrencyCode] || `${normalizedCurrencyCode} `
+}
 
 export function formatShortOrderCode(value: number | null | undefined): string | null {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return null
   return String(Math.max(0, Math.floor(Number(value)))).padStart(3, "0")
 }
 
-export function formatCurrencyDisplay(value: number | null | undefined): string {
-  return `${CURRENCY_SYMBOL}${Number(value || 0).toFixed(2)}`
+export function formatCurrencyDisplay(value: number | null | undefined, currencyCode: string | null | undefined = DEFAULT_CURRENCY_CODE): string {
+  return `${getCurrencySymbol(currencyCode)}${Number(value || 0).toFixed(2)}`
 }
 
 export function formatAudioTime(value: number | null | undefined): string {
