@@ -2,8 +2,8 @@ import { Dimensions, Platform, StatusBar } from "react-native"
 import { COLORS } from "./colors"
 
 export const FONT_SANS = Platform.select({
-  web: "Geist, Geist Fallback, Segoe UI, sans-serif",
-  ios: "System",
+  web: "'Plus Jakarta Sans', Geist, 'Avenir Next', 'Segoe UI', sans-serif",
+  ios: "Avenir Next",
   android: "sans-serif",
   default: "System",
 })
@@ -31,10 +31,28 @@ export const SAFE_AREA = {
 export const INPUT_PLACEHOLDER_COLOR = COLORS.TEXT_MUTED
 
 export const TYPOGRAPHY = {
-  DISPLAY: 24,
-  TITLE: 18,
+  DISPLAY: 28,
+  TITLE: 20,
   BODY: 15,
-  LABEL: 13,
+  LABEL: 12,
   CAPTION: 11,
   MICRO: 10,
+} as const
+
+export const SPACING = {
+  XXS: 4,
+  XS: 8,
+  SM: 12,
+  MD: 16,
+  LG: 20,
+  XL: 24,
+  XXL: 32,
+} as const
+
+export const RADIUS = {
+  SM: 12,
+  MD: 16,
+  LG: 20,
+  XL: 24,
+  PILL: 999,
 } as const

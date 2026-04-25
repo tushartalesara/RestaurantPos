@@ -133,12 +133,21 @@ function buildRestaurantFirstMessage(agentName: string) {
 }
 
 function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecret: string }) {
+  const dispatcherUrl = `${params.functionsBaseUrl}/voice-tool-dispatcher`
   const requestHeaders: Record<string, string> = {
     "Content-Type": "application/json",
   }
 
   if (params.toolSecret) {
     requestHeaders["x-tool-secret"] = params.toolSecret
+  }
+
+  function buildActionProperty(action: string) {
+    return {
+      type: "string",
+      enum: [action],
+      description: `Always send action=${action}.`,
+    }
   }
 
   return [
@@ -151,13 +160,14 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/get-menu-items`,
+        url: dispatcherUrl,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
-          required: ["agent_id"],
+          required: ["action", "agent_id"],
           properties: {
+            action: buildActionProperty("get-menu-items"),
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}} when available." },
             query: { type: "string", description: "Optional item name or keyword from the caller." },
@@ -180,13 +190,14 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/get-item-customizations`,
+        url: dispatcherUrl,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
-          required: ["agent_id"],
+          required: ["action", "agent_id"],
           properties: {
+            action: buildActionProperty("get-item-customizations"),
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}} when available." },
             item_id: { type: "string", description: "Preferred exact menu item id returned by another tool." },
@@ -204,13 +215,14 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/check-item-stock`,
+        url: dispatcherUrl,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
-          required: ["agent_id"],
+          required: ["action", "agent_id"],
           properties: {
+            action: buildActionProperty("check-item-stock"),
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}} when available." },
             item_id: { type: "string", description: "Preferred exact menu item id when available." },
@@ -229,13 +241,14 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/lookup-uk-postcode-addresses`,
+        url: dispatcherUrl,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
-          required: ["agent_id", "postcode"],
+          required: ["action", "agent_id", "postcode"],
           properties: {
+            action: buildActionProperty("lookup-uk-postcode-addresses"),
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}} when available." },
             postcode: { type: "string", description: "The UK delivery postcode provided by the caller." },
@@ -252,13 +265,14 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/get-order-quote`,
+        url: dispatcherUrl,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
-          required: ["agent_id", "conversation_id", "fulfillment_type", "items"],
+          required: ["action", "agent_id", "conversation_id", "fulfillment_type", "items"],
           properties: {
+            action: buildActionProperty("get-order-quote"),
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}}." },
             fulfillment_type: {
@@ -293,12 +307,13 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
       disable_interruptions: false,
       force_pre_tool_speech: false,
       api_schema: {
-        url: `${params.functionsBaseUrl}/place-order-atomic`,
+        url: dispatcherUrl,
         method: "POST",
         request_headers: requestHeaders,
         request_body_schema: {
           type: "object",
           required: [
+            "action",
             "agent_id",
             "conversation_id",
             "customer_name",
@@ -308,6 +323,7 @@ function buildRestaurantToolConfigs(params: { functionsBaseUrl: string; toolSecr
             "items",
           ],
           properties: {
+            action: buildActionProperty("place-order-atomic"),
             agent_id: { type: "string", description: "Use {{system__agent_id}}." },
             conversation_id: { type: "string", description: "Use {{system__conversation_id}}." },
             customer_name: { type: "string", description: "Customer name for the order." },

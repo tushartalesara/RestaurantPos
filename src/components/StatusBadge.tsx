@@ -27,9 +27,9 @@ export function StatusBadge({ label, tone }: StatusBadgeProps) {
 
 const styles = StyleSheet.create({
   badge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
     alignSelf: "flex-start",
     borderWidth: 1,
   },
@@ -38,8 +38,8 @@ const styles = StyleSheet.create({
   cancelled: { backgroundColor: COLORS.DANGER_BG, borderColor: COLORS.DANGER },
   text: {
     fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.5,
+    fontWeight: "800",
+    letterSpacing: 0.7,
     textTransform: "uppercase",
     fontFamily: FONT_SANS,
   },

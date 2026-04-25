@@ -1,7 +1,8 @@
 import React from "react"
 import { Modal, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, View } from "react-native"
+import { AppIcon } from "../components/AppIcon"
 import { COLORS } from "../constants/colors"
-import { FONT_SANS, SAFE_AREA } from "../constants/layout"
+import { FONT_SANS, RADIUS, SAFE_AREA, SPACING, TYPOGRAPHY } from "../constants/layout"
 import type { ReceiptOrder } from "../types"
 import { ReceiptContent } from "../utils/receiptContent"
 
@@ -39,14 +40,20 @@ export function ReceiptPreviewModal({
   return (
     <Modal visible animationType="slide" transparent={false} onRequestClose={onClose} statusBarTranslucent={false}>
       <SafeAreaView style={styles.screen}>
-        <StatusBar barStyle="light-content" backgroundColor="#1A1A2E" translucent={false} />
+        <StatusBar barStyle="light-content" backgroundColor={COLORS.PAPER_SURROUND} translucent={false} />
         <View style={styles.header}>
           <Pressable style={styles.closeButton} onPress={onClose}>
-            <Text style={styles.closeButtonText}>{"\u00D7"}</Text>
+            <AppIcon name="x" size={22} color="rgba(255,255,255,0.84)" />
           </Pressable>
-          <Text style={styles.title}>Receipt Preview</Text>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerEyebrow}>Print Center</Text>
+            <Text style={styles.title}>Receipt Preview</Text>
+          </View>
           <Pressable style={styles.printButton} onPress={onPrint}>
-            <Text style={styles.printButtonText}>{"\u{1F5A8}\uFE0F Print"}</Text>
+            <View style={styles.buttonLabelRow}>
+              <AppIcon name="printer" size={16} color={COLORS.HEADER_TEXT} />
+              <Text style={styles.printButtonText}>Print</Text>
+            </View>
           </Pressable>
         </View>
         <ScrollView
@@ -73,36 +80,59 @@ export function ReceiptPreviewModal({
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: "#1A1A2E",
+    backgroundColor: COLORS.PAPER_SURROUND,
     paddingTop: Platform.OS === "android" ? SAFE_AREA.top : 0,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: "#1A1A2E",
+    paddingHorizontal: SPACING.LG,
+    paddingVertical: SPACING.SM,
+    backgroundColor: COLORS.PAPER_SURROUND,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+    gap: SPACING.SM,
+  },
+  headerTitleWrap: {
+    flex: 1,
+    alignItems: "center",
+    gap: SPACING.XXS,
+  },
+  headerEyebrow: {
+    color: "rgba(255,255,255,0.58)",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    fontFamily: FONT_SANS,
   },
   title: {
-    color: "#FFFFFF",
-    fontSize: 17,
-    fontWeight: "700",
+    color: COLORS.HEADER_TEXT,
+    fontSize: TYPOGRAPHY.TITLE,
+    fontWeight: "800",
     fontFamily: FONT_SANS,
   },
   printButton: {
     backgroundColor: COLORS.ACCENT,
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
+    borderRadius: RADIUS.MD,
+    paddingVertical: SPACING.SM,
+    paddingHorizontal: SPACING.MD,
     minWidth: 96,
     alignItems: "center",
   },
   printButtonText: {
-    color: "#FFFFFF",
+    color: COLORS.HEADER_TEXT,
     fontSize: 14,
-    fontWeight: "600",
+    fontWeight: "800",
+    letterSpacing: 0.2,
     fontFamily: FONT_SANS,
+  },
+  buttonLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: SPACING.XS,
   },
   closeButton: {
     width: 44,
@@ -110,31 +140,27 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingVertical: 4,
   },
-  closeButtonText: {
-    color: "#FFFFFF",
-    fontSize: 22,
-    lineHeight: 24,
-    fontFamily: FONT_SANS,
-  },
   scroll: {
     flex: 1,
-    backgroundColor: "#1A1A2E",
+    backgroundColor: COLORS.PAPER_SURROUND,
   },
   scrollContent: {
-    paddingVertical: 20,
-    paddingHorizontal: 20,
+    paddingVertical: SPACING.LG,
+    paddingHorizontal: SPACING.LG,
     alignItems: "center",
-    paddingBottom: SAFE_AREA.bottom + 24,
+    paddingBottom: SAFE_AREA.bottom + SPACING.XL,
   },
   paperWrap: {
     alignItems: "center",
   },
   paper: {
-    backgroundColor: "#F5F0E8",
-    width: 280,
-    paddingHorizontal: 20,
-    paddingTop: 24,
+    backgroundColor: COLORS.PAPER,
+    width: 296,
+    paddingHorizontal: SPACING.LG,
+    paddingTop: SPACING.XL,
     paddingBottom: 0,
+    borderRadius: RADIUS.XL,
+    overflow: "hidden",
     ...PAPER_SHADOW,
   },
   tearRow: {
@@ -151,6 +177,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 10,
     borderLeftColor: "transparent",
     borderRightColor: "transparent",
-    borderBottomColor: "#1A1A2E",
+    borderBottomColor: COLORS.PAPER_SURROUND,
   },
 })

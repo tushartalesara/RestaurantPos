@@ -15,6 +15,7 @@ export interface RestaurantRecord {
   address: string | null
   countryCode: string
   currencyCode: string
+  hasPaymentPin?: boolean
   created_at: string
   updated_at: string
 }
@@ -63,6 +64,10 @@ export interface OrderCallReviewRecord {
   conversationId?: string | null
   transcriptText?: string | null
   recordingUrl?: string | null
+  recordingStorageBucket?: string | null
+  recordingStoragePath?: string | null
+  recordingSizeBytes?: number | null
+  localRecordingUri?: string | null
   analysisStatus?: string | null
   created_at?: string
   updated_at?: string

@@ -1,17 +1,18 @@
 import React from "react"
 import { Modal, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, View } from "react-native"
+import { AppIcon } from "../components/AppIcon"
 import { COLORS } from "../constants/colors"
-import { FONT_SANS, SAFE_AREA } from "../constants/layout"
+import { FONT_SANS, RADIUS, SAFE_AREA, SPACING, TYPOGRAPHY } from "../constants/layout"
 
 const AUDIO_CARD_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px 3px 8px rgba(0, 0, 0, 0.06)",
+      boxShadow: "0px 14px 30px rgba(8, 16, 29, 0.08)",
     }
   : {
-      shadowColor: "#000",
-      shadowOffset: { width: 0, height: 3 },
-      shadowOpacity: 0.06,
-      shadowRadius: 8,
+      shadowColor: COLORS.SHADOW,
+      shadowOffset: { width: 0, height: 10 },
+      shadowOpacity: 0.08,
+      shadowRadius: 16,
       elevation: 2,
     }) as Record<string, unknown>
 
@@ -76,7 +77,7 @@ export function CallReviewModal({
       statusBarTranslucent={false}
     >
       <SafeAreaView style={styles.screen}>
-        <StatusBar barStyle="dark-content" backgroundColor="#F5F5F5" translucent={false} />
+        <StatusBar barStyle="dark-content" backgroundColor={COLORS.BACKGROUND} translucent={false} />
         <View style={styles.header}>
           <View style={styles.headerTextWrap}>
             <Text style={styles.title}>Call Review</Text>
@@ -88,7 +89,10 @@ export function CallReviewModal({
             </View>
           </View>
           <Pressable style={styles.closeButton} onPress={onClose}>
-            <Text style={styles.closeButtonText}>Done</Text>
+            <View style={styles.actionLabelRow}>
+              <AppIcon name="check" size={16} color={COLORS.TEXT_PRIMARY} />
+              <Text style={styles.closeButtonText}>Done</Text>
+            </View>
           </Pressable>
         </View>
 
@@ -98,23 +102,36 @@ export function CallReviewModal({
             onPress={hasRecording ? onToggleRecording : undefined}
             disabled={!hasRecording}
           >
-            <Text
+            <View
               style={[
-                styles.audioIcon,
+                styles.audioIconWrap,
                 isPlaying ? styles.audioIconStop : styles.audioIconPlay,
                 !hasRecording ? styles.audioIconDisabled : null,
               ]}
             >
-              {isPlaying ? "\u25A0" : "\u25B6"}
-            </Text>
+              {isPlaying ? <AppIcon name="square" size={18} color={COLORS.HEADER_TEXT} /> : <AppIcon name="play" size={20} color={COLORS.HEADER_TEXT} />}
+            </View>
           </Pressable>
           <View style={styles.audioContent}>
+            <View style={styles.audioHeaderRow}>
+              <View style={styles.audioHeaderTextWrap}>
+                <Text style={styles.audioEyebrow}>Call Audio</Text>
+                <Text style={styles.audioTitle}>
+                  {hasRecording ? (isPlaying ? "Playing the recording" : "Playback ready") : "Recording unavailable"}
+                </Text>
+              </View>
+              <View style={[styles.audioPill, !hasRecording ? styles.audioPillDisabled : null]}>
+                <Text style={[styles.audioPillText, !hasRecording ? styles.audioPillTextDisabled : null]}>
+                  {hasRecording ? totalTime : "No file"}
+                </Text>
+              </View>
+            </View>
             <View style={styles.audioProgressTrack}>
               <View style={[styles.audioProgressFill, { width: progressWidth }]} />
             </View>
             <View style={styles.audioTimeRow}>
               <Text style={styles.audioTimeText}>{elapsedTime}</Text>
-              <Text style={styles.audioTimeText}>{totalTime}</Text>
+              <Text style={styles.audioTimeText}>{hasRecording ? "Tap to play or pause" : "Audio will appear after processing"}</Text>
             </View>
           </View>
         </View>
@@ -136,7 +153,7 @@ export function CallReviewModal({
                   <View key={`transcript-entry-${index}`} style={styles.transcriptGroup}>
                     <View style={styles.agentHeaderRow}>
                       <View style={styles.agentIconCircle}>
-                        <Text style={styles.agentIcon}>{"\u{1F916}"}</Text>
+                        <AppIcon name="mic" size={16} color={COLORS.VOICE_COLOR} />
                       </View>
                       <Text style={styles.agentSpeaker}>AGENT</Text>
                     </View>
@@ -156,7 +173,7 @@ export function CallReviewModal({
                         <Text style={styles.transcriptMessage}>{entry.message}</Text>
                       </View>
                       <View style={styles.customerAvatarCircle}>
-                        <Text style={styles.customerAvatarIcon}>{"\u{1F464}"}</Text>
+                        <AppIcon name="user" size={16} color={COLORS.TEXT_SECONDARY} />
                       </View>
                     </View>
                   </View>
@@ -190,204 +207,261 @@ export function CallReviewModal({
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: "#F5F5F5",
+    backgroundColor: COLORS.BACKGROUND,
     paddingTop: Platform.OS === "android" ? SAFE_AREA.top : 0,
   },
   header: {
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-    backgroundColor: "#F5F5F5",
-    gap: 16,
+    paddingHorizontal: SPACING.LG,
+    paddingTop: SPACING.LG,
+    paddingBottom: SPACING.SM,
+    backgroundColor: COLORS.BACKGROUND,
+    gap: SPACING.MD,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.BORDER,
   },
   headerTextWrap: {
     flex: 1,
     minWidth: 0,
+    gap: SPACING.XS,
   },
   title: {
-    fontSize: 28,
+    fontSize: TYPOGRAPHY.DISPLAY + 2,
     fontWeight: "800",
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   customerMetaRow: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
-    gap: 8,
-    marginTop: 6,
+    gap: SPACING.XS + 2,
   },
   customerName: {
-    fontSize: 17,
-    fontWeight: "600",
-    color: "#1A1A1A",
+    fontSize: 16,
+    fontWeight: "700",
+    color: COLORS.TEXT_SECONDARY,
     fontFamily: FONT_SANS,
   },
   statusBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 20,
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS - 2,
+    borderRadius: RADIUS.PILL,
+    borderWidth: 1,
   },
-  statusBadgeCompleted: { backgroundColor: "#7B1FA2" },
-  statusBadgeProcessing: { backgroundColor: "#1565C0" },
-  statusBadgeDefault: { backgroundColor: "#9E9E9E" },
+  statusBadgeCompleted: { backgroundColor: COLORS.SUCCESS_BG, borderColor: COLORS.SUCCESS },
+  statusBadgeProcessing: { backgroundColor: COLORS.ACCENT_LIGHT, borderColor: COLORS.ACCENT },
+  statusBadgeDefault: { backgroundColor: COLORS.SURFACE_RAISED, borderColor: COLORS.BORDER },
   statusBadgeText: {
     fontSize: 11,
-    fontWeight: "700",
-    color: "#FFFFFF",
+    fontWeight: "800",
+    color: COLORS.TEXT_PRIMARY,
     textTransform: "uppercase",
-    letterSpacing: 0.5,
+    letterSpacing: 0.7,
     fontFamily: FONT_SANS,
   },
   closeButton: {
-    backgroundColor: "transparent",
-    borderRadius: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    backgroundColor: COLORS.SURFACE,
+    borderRadius: RADIUS.MD,
+    paddingVertical: SPACING.SM - 2,
+    paddingHorizontal: SPACING.MD,
     borderWidth: 1,
-    borderColor: "#C0C0C0",
+    borderColor: COLORS.BORDER,
     minWidth: 84,
     alignItems: "center",
   },
   closeButtonText: {
     fontSize: 15,
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
-  audioCard: {
-    marginHorizontal: 16,
-    marginBottom: 0,
-    padding: 16,
-    borderRadius: 16,
-    backgroundColor: COLORS.SURFACE,
-    ...AUDIO_CARD_SHADOW,
+  actionLabelRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 16,
+    justifyContent: "center",
+    gap: SPACING.XS,
+  },
+  audioCard: {
+    marginHorizontal: SPACING.LG - 2,
+    marginTop: SPACING.LG - 2,
+    marginBottom: 0,
+    padding: SPACING.LG - 2,
+    borderRadius: RADIUS.XL,
+    backgroundColor: COLORS.SURFACE,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    ...AUDIO_CARD_SHADOW,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: SPACING.LG - 2,
   },
   audioButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: "#7B1FA2",
+    width: 60,
+    height: 60,
+    borderRadius: RADIUS.LG + 2,
+    backgroundColor: COLORS.VOICE_COLOR,
     alignItems: "center",
     justifyContent: "center",
   },
   audioButtonDisabled: {
-    backgroundColor: "#D7D7D7",
+    backgroundColor: COLORS.BORDER,
   },
-  audioContent: { flex: 1, gap: 10 },
-  audioIcon: {
-    color: "#FFFFFF",
-    textAlign: "center",
+  audioContent: { flex: 1, gap: SPACING.SM, paddingTop: 2 },
+  audioHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: SPACING.SM - 2,
+  },
+  audioHeaderTextWrap: {
+    flex: 1,
+    gap: SPACING.XXS,
+  },
+  audioEyebrow: {
+    color: COLORS.VOICE_COLOR,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1,
+    textTransform: "uppercase",
     fontFamily: FONT_SANS,
   },
+  audioTitle: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: TYPOGRAPHY.TITLE - 1,
+    fontWeight: "800",
+    fontFamily: FONT_SANS,
+  },
+  audioPill: {
+    paddingHorizontal: SPACING.XS + 2,
+    paddingVertical: SPACING.XS - 2,
+    borderRadius: RADIUS.PILL,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+  },
+  audioPillDisabled: {
+    backgroundColor: COLORS.BORDER,
+  },
+  audioPillText: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 12,
+    fontWeight: "800",
+    fontFamily: FONT_SANS,
+  },
+  audioPillTextDisabled: {
+    color: COLORS.TEXT_SECONDARY,
+  },
+  audioIconWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
   audioIconPlay: {
-    fontSize: 20,
     paddingLeft: 3,
   },
   audioIconStop: {
-    fontSize: 18,
   },
   audioIconDisabled: {
-    color: "#8A8A8A",
+    opacity: 0.5,
   },
   audioProgressTrack: {
     flex: 1,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "#E0E0E0",
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: COLORS.SURFACE_RAISED,
     overflow: "hidden",
   },
   audioProgressFill: {
     height: "100%",
-    borderRadius: 2,
-    backgroundColor: "#7B1FA2",
+    borderRadius: 999,
+    backgroundColor: COLORS.VOICE_COLOR,
   },
   audioTimeRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
+    gap: SPACING.SM,
   },
   audioTimeText: {
-    color: "#888888",
+    flex: 1,
+    color: COLORS.TEXT_SECONDARY,
     fontSize: 12,
     fontFamily: FONT_SANS,
   },
   transcriptSectionHeader: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 12,
-    backgroundColor: "#F5F5F5",
+    paddingHorizontal: SPACING.LG,
+    paddingTop: SPACING.LG,
+    paddingBottom: SPACING.SM,
+    backgroundColor: COLORS.BACKGROUND,
   },
   sectionLabel: {
     fontSize: 11,
-    fontWeight: "700",
-    color: "#999999",
-    letterSpacing: 1.5,
+    fontWeight: "800",
+    color: COLORS.TEXT_MUTED,
+    letterSpacing: 1.6,
     textTransform: "uppercase",
     fontFamily: FONT_SANS,
   },
   sectionDivider: {
-    marginTop: 8,
+    marginTop: SPACING.XS,
     height: StyleSheet.hairlineWidth,
-    backgroundColor: "#E0E0E0",
+    backgroundColor: COLORS.BORDER,
   },
   transcriptScroll: {
     flex: 1,
-    backgroundColor: "#F5F5F5",
+    backgroundColor: COLORS.BACKGROUND,
   },
   transcriptScrollContent: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    paddingBottom: SAFE_AREA.bottom + 24,
+    paddingHorizontal: SPACING.LG - 2,
+    paddingVertical: SPACING.SM,
+    paddingBottom: SAFE_AREA.bottom + SPACING.XL,
   },
   transcriptGroup: {
-    marginBottom: 20,
+    marginBottom: SPACING.LG - 2,
   },
   agentHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: SPACING.XS,
   },
   agentIconCircle: {
     width: 32,
     height: 32,
-    borderRadius: 16,
-    backgroundColor: "#EDE7F6",
+    borderRadius: RADIUS.MD,
+    backgroundColor: COLORS.VOICE_BG,
     alignItems: "center",
     justifyContent: "center",
-  },
-  agentIcon: {
-    fontSize: 16,
+    borderWidth: 1,
+    borderColor: COLORS.VOICE_BORDER,
   },
   agentSpeaker: {
     fontSize: 11,
-    fontWeight: "600",
-    color: "#888888",
-    marginLeft: 8,
-    letterSpacing: 0.5,
+    fontWeight: "700",
+    color: COLORS.TEXT_MUTED,
+    marginLeft: SPACING.XS,
+    letterSpacing: 0.7,
     fontFamily: FONT_SANS,
   },
   agentBubble: {
-    maxWidth: "85%",
+    maxWidth: "86%",
     marginLeft: 40,
-    padding: 12,
-    borderRadius: 16,
-    borderTopLeftRadius: 4,
-    backgroundColor: "#EDE7F6",
+    padding: SPACING.SM + 2,
+    borderRadius: RADIUS.LG - 2,
+    borderTopLeftRadius: 6,
+    backgroundColor: COLORS.VOICE_BG,
+    borderWidth: 1,
+    borderColor: COLORS.VOICE_BORDER,
     alignSelf: "flex-start",
   },
   customerSpeaker: {
     fontSize: 11,
-    color: "#888888",
+    color: COLORS.TEXT_MUTED,
     textAlign: "right",
     marginBottom: 4,
-    letterSpacing: 0.5,
-    fontWeight: "600",
+    letterSpacing: 0.7,
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   customerBubbleRow: {
@@ -396,65 +470,69 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
   },
   customerBubble: {
-    maxWidth: "75%",
-    marginRight: 8,
-    padding: 12,
-    borderRadius: 16,
-    borderTopRightRadius: 4,
-    backgroundColor: "#EEEEEE",
+    maxWidth: "78%",
+    marginRight: SPACING.XS,
+    padding: SPACING.SM + 2,
+    borderRadius: RADIUS.LG - 2,
+    borderTopRightRadius: 6,
+    backgroundColor: COLORS.SURFACE,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     alignSelf: "flex-end",
   },
   customerAvatarCircle: {
     width: 32,
     height: 32,
-    borderRadius: 16,
-    backgroundColor: "#CCCCCC",
+    borderRadius: RADIUS.MD,
+    backgroundColor: COLORS.SURFACE_RAISED,
     alignItems: "center",
     justifyContent: "center",
-  },
-  customerAvatarIcon: {
-    fontSize: 16,
-    color: "#5F5F5F",
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
   },
   neutralSpeaker: {
     fontSize: 11,
-    fontWeight: "600",
-    color: "#888888",
+    fontWeight: "700",
+    color: COLORS.TEXT_MUTED,
     marginBottom: 4,
-    letterSpacing: 0.5,
+    letterSpacing: 0.7,
     fontFamily: FONT_SANS,
   },
   neutralBubble: {
     maxWidth: "84%",
-    padding: 12,
-    borderRadius: 16,
-    backgroundColor: "#FFFFFF",
+    padding: SPACING.SM + 2,
+    borderRadius: RADIUS.LG - 2,
+    backgroundColor: COLORS.SURFACE,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     alignSelf: "center",
   },
   transcriptMessage: {
     fontSize: 15,
     lineHeight: 22,
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   transcriptFallback: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    padding: 16,
+    backgroundColor: COLORS.SURFACE,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.LG - 2,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   transcriptFallbackText: {
     fontSize: 15,
     lineHeight: 22,
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   transcriptEmptyWrap: {
     alignItems: "center",
-    paddingVertical: 40,
+    paddingVertical: SPACING.XXL + SPACING.XS,
   },
   transcriptEmpty: {
     fontSize: 14,
-    color: "#888888",
+    color: COLORS.TEXT_SECONDARY,
     fontFamily: FONT_SANS,
   },
 })

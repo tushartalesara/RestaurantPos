@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.8"
+import { compare } from "https://deno.land/x/bcrypt@v0.4.1/mod.ts"
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -51,13 +52,6 @@ function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100
 }
 
-function resolvePaymentPin(): string {
-  return (
-    normalizeString(Deno.env.get("MOBILE_ONBOARDING_ORDER_PAYMENT_PIN")) ||
-    normalizeString(Deno.env.get("ORDER_PAYMENT_PIN"))
-  )
-}
-
 async function resolveUserId(request: Request, supabaseUrl: string, supabaseAnonKey: string) {
   const authHeader =
     normalizeString(request.headers.get("Authorization")) || normalizeString(request.headers.get("authorization"))
@@ -94,15 +88,9 @@ serve(async (request) => {
   const supabaseUrl = normalizeString(Deno.env.get("SUPABASE_URL"))
   const supabaseAnonKey = normalizeString(Deno.env.get("SUPABASE_ANON_KEY"))
   const supabaseServiceRoleKey = normalizeString(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))
-  const expectedPin = resolvePaymentPin()
 
   if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
     return jsonResponse(500, { error: "Supabase function environment is incomplete." })
-  }
-  if (!expectedPin) {
-    return jsonResponse(500, {
-      error: "Order payment PIN is not configured. Set ORDER_PAYMENT_PIN in Supabase secrets.",
-    })
   }
 
   let userId = ""
@@ -139,9 +127,6 @@ serve(async (request) => {
   if (!pin) {
     return jsonResponse(400, { error: "pin is required." })
   }
-  if (pin !== expectedPin) {
-    return jsonResponse(403, { error: "Incorrect PIN." })
-  }
   if (paymentStatus === "paid" && !paymentMethod) {
     return jsonResponse(400, { error: "Choose cash or card before marking the order as paid." })
   }
@@ -152,16 +137,36 @@ serve(async (request) => {
 
   const restaurantLookup = await supabase
     .from("restaurants")
-    .select("id")
+    .select("id, payment_pin_hash")
     .eq("id", restaurantId)
     .eq("owner_user_id", userId)
     .maybeSingle()
 
   if (restaurantLookup.error) {
+    const message = normalizeString(restaurantLookup.error.message)
+    if (message.toLowerCase().includes("payment_pin_hash")) {
+      return jsonResponse(500, {
+        error: message || "Per-restaurant payment PIN fields are missing.",
+        remediation: "Run supabase/021_scalability_payment_and_indexes.sql in Supabase SQL Editor, then retry.",
+      })
+    }
     return jsonResponse(500, { error: restaurantLookup.error.message })
   }
   if (!restaurantLookup.data?.id) {
     return jsonResponse(403, { error: "You do not have access to this restaurant." })
+  }
+
+  const paymentPinHash = normalizeString(restaurantLookup.data.payment_pin_hash)
+  if (!paymentPinHash) {
+    return jsonResponse(403, {
+      error: "No payment PIN is configured for this restaurant yet.",
+      remediation: "Open Admin settings and save a restaurant-specific payment PIN first.",
+    })
+  }
+
+  const pinValid = await compare(pin, paymentPinHash).catch(() => false)
+  if (!pinValid) {
+    return jsonResponse(403, { error: "Incorrect PIN." })
   }
 
   const orderLookup = await supabase

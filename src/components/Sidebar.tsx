@@ -1,7 +1,8 @@
 import React from "react"
 import { Pressable, StyleSheet, Text, View } from "react-native"
+import { AppIcon } from "./AppIcon"
 import { COLORS } from "../constants/colors"
-import { FONT_SANS } from "../constants/layout"
+import { FONT_SANS, RADIUS, SPACING } from "../constants/layout"
 import type { MainTab } from "../types"
 
 type SidebarProps = {
@@ -11,11 +12,18 @@ type SidebarProps = {
 }
 
 export function Sidebar({ activeTab, onSelectTab, onOpenSettings }: SidebarProps) {
-  const tabs: Array<{ key: MainTab; icon: string; label: string }> = [{ key: "orders", icon: "\u{1F4CB}", label: "Orders" }]
+  const tabs: Array<{ key: MainTab; icon: "clipboard"; label: string }> = [{ key: "orders", icon: "clipboard", label: "Orders" }]
 
   return (
     <View style={styles.sidebar}>
       <View style={styles.top}>
+        <View style={styles.brandBlock}>
+          <View style={styles.brandMark}>
+            <Text style={styles.brandMarkText}>CR</Text>
+          </View>
+          <Text style={styles.brandLabel}>Console</Text>
+          <Text style={styles.brandSubLabel}>Ops</Text>
+        </View>
         {tabs.map((tab) => {
           const isActive = activeTab === tab.key
           return (
@@ -25,16 +33,20 @@ export function Sidebar({ activeTab, onSelectTab, onOpenSettings }: SidebarProps
               onPress={() => onSelectTab(tab.key)}
               accessibilityLabel={tab.label}
             >
-              <Text style={[styles.icon, isActive ? styles.iconActive : null]}>{tab.icon}</Text>
-              <Text style={[styles.label, isActive ? styles.labelActive : null]}>{tab.label.toUpperCase()}</Text>
+              <View style={[styles.iconWrap, isActive ? styles.iconWrapActive : null]}>
+                <AppIcon name={tab.icon} size={18} color={isActive ? COLORS.HEADER_TEXT : "rgba(255,255,255,0.68)"} />
+              </View>
+              <Text style={[styles.label, isActive ? styles.labelActive : null]}>{tab.label}</Text>
             </Pressable>
           )
         })}
       </View>
 
       <Pressable style={styles.item} onPress={onOpenSettings} accessibilityLabel="Settings">
-        <Text style={styles.icon}>{"\u2699\uFE0F"}</Text>
-        <Text style={styles.label}>CONFIG</Text>
+        <View style={styles.iconWrap}>
+          <AppIcon name="settings" size={18} color="rgba(255,255,255,0.68)" />
+        </View>
+        <Text style={styles.label}>Settings</Text>
       </Pressable>
     </View>
   )
@@ -42,40 +54,87 @@ export function Sidebar({ activeTab, onSelectTab, onOpenSettings }: SidebarProps
 
 const styles = StyleSheet.create({
   sidebar: {
-    width: 76,
-    backgroundColor: COLORS.HEADER_BG,
+    width: 94,
+    backgroundColor: COLORS.SURFACE_DARK,
     borderRightWidth: 1,
     borderRightColor: COLORS.SIDEBAR_BORDER,
     justifyContent: "space-between",
-    paddingVertical: 14,
+    paddingHorizontal: SPACING.XS,
+    paddingVertical: SPACING.LG,
   },
-  top: { gap: 4 },
-  item: {
-    height: 70,
+  top: { gap: SPACING.SM },
+  brandBlock: {
+    alignItems: "center",
+    gap: SPACING.XXS + 1,
+    paddingBottom: SPACING.XS,
+  },
+  brandMark: {
+    width: 42,
+    height: 42,
+    borderRadius: RADIUS.MD,
     alignItems: "center",
     justifyContent: "center",
-    borderLeftWidth: 3,
-    borderLeftColor: "transparent",
-    gap: 4,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  brandMarkText: {
+    color: COLORS.HEADER_TEXT,
+    fontSize: 15,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    fontFamily: FONT_SANS,
+  },
+  brandLabel: {
+    color: COLORS.HEADER_TEXT,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.9,
+    textTransform: "uppercase",
+    fontFamily: FONT_SANS,
+  },
+  brandSubLabel: {
+    color: "rgba(255,255,255,0.56)",
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 0.7,
+    textTransform: "uppercase",
+    fontFamily: FONT_SANS,
+  },
+  item: {
+    minHeight: 74,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: RADIUS.LG,
+    borderWidth: 1,
+    borderColor: "transparent",
+    gap: SPACING.XS,
+    paddingVertical: SPACING.SM,
   },
   itemActive: {
     backgroundColor: COLORS.SIDEBAR_TINT,
-    borderLeftColor: COLORS.ACCENT,
+    borderColor: "rgba(13, 138, 115, 0.38)",
   },
-  icon: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 22,
-    textAlign: "center",
-    fontFamily: FONT_SANS,
+  iconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.MD,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
   },
-  iconActive: { color: COLORS.ACCENT },
+  iconWrapActive: {
+    backgroundColor: COLORS.ACCENT,
+    borderColor: COLORS.ACCENT,
+  },
   label: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 9,
-    fontWeight: "600",
-    marginTop: 4,
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 10,
+    fontWeight: "700",
     textTransform: "uppercase",
-    letterSpacing: 0.5,
+    letterSpacing: 0.7,
     fontFamily: FONT_SANS,
   },
   labelActive: { color: COLORS.HEADER_TEXT },

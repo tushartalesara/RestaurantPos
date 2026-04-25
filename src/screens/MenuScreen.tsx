@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useMemo } from "react"
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native"
+import { AppIcon } from "../components/AppIcon"
 import { COLORS } from "../constants/colors"
-import { FONT_SANS, INPUT_PLACEHOLDER_COLOR, SAFE_AREA } from "../constants/layout"
+import { FONT_SANS, INPUT_PLACEHOLDER_COLOR, RADIUS, SPACING, TYPOGRAPHY } from "../constants/layout"
 import type { MenuItemDraft, UiDraftItem } from "../types"
 import { formatCurrencyDisplay } from "../utils/formatters"
 
@@ -61,6 +62,22 @@ type LabeledInputProps = {
   multiline?: boolean
 }
 
+type SectionHeaderProps = {
+  eyebrow: string
+  title: string
+  description: string
+}
+
+function SectionHeader({ eyebrow, title, description }: SectionHeaderProps) {
+  return (
+    <View style={styles.sectionHeader}>
+      <Text style={styles.sectionEyebrow}>{eyebrow}</Text>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      <Text style={styles.sectionDescription}>{description}</Text>
+    </View>
+  )
+}
+
 function LabeledInput({
   label,
   value,
@@ -94,9 +111,19 @@ const SavedMenuItemCard = memo(function SavedMenuItemCard({ item, currencyCode }
 
   return (
     <View style={styles.savedCard}>
-      <Text style={styles.savedName}>
-        {item.name} - {formatCurrencyDisplay(item.basePrice, currencyCode)}
-      </Text>
+      <View style={styles.savedCardHeader}>
+        <View style={styles.savedCardTitleWrap}>
+          {item.category ? (
+            <View style={styles.savedCategoryBadge}>
+              <Text style={styles.savedCategoryText}>{item.category}</Text>
+            </View>
+          ) : null}
+          <Text style={styles.savedName}>{item.name}</Text>
+        </View>
+        <View style={styles.savedPriceBadge}>
+          <Text style={styles.savedPriceText}>{formatCurrencyDisplay(item.basePrice, currencyCode)}</Text>
+        </View>
+      </View>
       {item.description ? (
         <Text style={styles.savedMeta}>
           <Text style={styles.savedMetaLabel}>Includes: </Text>
@@ -137,7 +164,15 @@ const EditableMenuItemCard = memo(function EditableMenuItemCard({
 }: EditableMenuItemCardProps) {
   return (
     <View style={styles.editableCard}>
-      <Text style={styles.itemNumber}>Menu Item {index + 1}</Text>
+      <View style={styles.editableCardHeader}>
+        <Text style={styles.itemNumber}>Menu Item {index + 1}</Text>
+        <Pressable style={styles.removeChipButton} onPress={() => onRemoveEditableMenuItem(index)}>
+          <View style={styles.buttonLabelRow}>
+            <AppIcon name="x" size={14} color={COLORS.DANGER_DARK} />
+            <Text style={styles.removeChipButtonText}>Remove</Text>
+          </View>
+        </Pressable>
+      </View>
       <LabeledInput
         label="Item Name"
         value={item.name}
@@ -178,9 +213,6 @@ const EditableMenuItemCard = memo(function EditableMenuItemCard({
         placeholder="Extra Cheese+30, Spice Level"
         multiline
       />
-      <Pressable style={styles.secondaryButton} onPress={() => onRemoveEditableMenuItem(index)}>
-        <Text style={styles.secondaryButtonText}>Remove Item</Text>
-      </Pressable>
     </View>
   )
 })
@@ -243,13 +275,25 @@ export function MenuScreen({
     ({ item }: { item: MenuRow }) => {
       switch (item.kind) {
         case "savedHeader":
-          return <Text style={styles.sectionTitle}>View Menu</Text>
+          return (
+            <SectionHeader
+              eyebrow="Live Menu"
+              title="Current menu lineup"
+              description="Review what staff and the voice agent can currently sell, including pricing and stock."
+            />
+          )
         case "savedEmpty":
           return <Text style={styles.emptyText}>No saved items yet.</Text>
         case "savedItem":
           return <SavedMenuItemCard item={item.item} currencyCode={currencyCode} />
         case "editHeader":
-          return <Text style={styles.sectionTitle}>Edit Menu (Including Prices)</Text>
+          return (
+            <SectionHeader
+              eyebrow="Editor"
+              title="Refine the menu"
+              description="Adjust names, pricing, descriptions, and stock so every ordering surface stays in sync."
+            />
+          )
         case "editEmpty":
           return <Text style={styles.emptyText}>No menu items to edit yet.</Text>
         case "editableItem":
@@ -263,13 +307,23 @@ export function MenuScreen({
           )
         case "actions":
           return (
-            <View style={styles.actionRow}>
-              <Pressable style={styles.secondaryButton} onPress={onAddEditableMenuItem}>
-                <Text style={styles.secondaryButtonText}>Add Menu Item</Text>
-              </Pressable>
-              <Pressable style={styles.primaryWideButton} onPress={onSaveEditedMenu} disabled={busy}>
-                <Text style={styles.primaryWideButtonText}>Save Menu Changes</Text>
-              </Pressable>
+            <View style={styles.actionsPanel}>
+              <Text style={styles.actionsTitle}>Ready to update the live menu?</Text>
+              <Text style={styles.actionsSubtitle}>Add new dishes or publish your latest pricing changes in one step.</Text>
+              <View style={styles.actionRow}>
+                <Pressable style={styles.secondaryButton} onPress={onAddEditableMenuItem}>
+                  <View style={styles.buttonLabelRow}>
+                    <AppIcon name="plus" size={16} color={COLORS.TEXT_PRIMARY} />
+                    <Text style={styles.secondaryButtonText}>Add Menu Item</Text>
+                  </View>
+                </Pressable>
+                <Pressable style={styles.primaryWideButton} onPress={onSaveEditedMenu} disabled={busy}>
+                  <View style={styles.buttonLabelRow}>
+                    <AppIcon name={busy ? "loader" : "save"} size={16} color={COLORS.SURFACE} />
+                    <Text style={styles.primaryWideButtonText}>{busy ? "Saving..." : "Save Menu Changes"}</Text>
+                  </View>
+                </Pressable>
+              </View>
             </View>
           )
         default:
@@ -307,38 +361,102 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 18,
-    fontWeight: "700",
+    fontSize: 23,
+    fontWeight: "800",
     fontFamily: FONT_SANS,
-    marginBottom: 12,
+  },
+  sectionHeader: {
+    marginBottom: SPACING.MD,
+    paddingHorizontal: SPACING.XXS,
+    gap: SPACING.XXS,
+  },
+  sectionEyebrow: {
+    color: COLORS.ACCENT,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1.3,
+    textTransform: "uppercase",
+    fontFamily: FONT_SANS,
+  },
+  sectionDescription: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: TYPOGRAPHY.BODY - 1,
+    lineHeight: 22,
+    fontFamily: FONT_SANS,
   },
   emptyText: {
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 14,
+    lineHeight: 20,
     fontFamily: FONT_SANS,
-    marginBottom: 12,
+    marginBottom: SPACING.MD,
+    paddingHorizontal: SPACING.XXS,
   },
   savedCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 10,
+    borderRadius: RADIUS.XL,
     borderWidth: 1,
     borderColor: COLORS.BORDER,
-    padding: 14,
-    marginBottom: 10,
-    gap: 6,
+    padding: SPACING.LG - 2,
+    marginBottom: SPACING.SM,
+    gap: SPACING.SM - 2,
+    ...EDITABLE_CARD_SHADOW,
+  },
+  savedCardHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: SPACING.SM,
+  },
+  savedCardTitleWrap: {
+    flex: 1,
+    gap: SPACING.XS,
+  },
+  savedCategoryBadge: {
+    alignSelf: "flex-start",
+    paddingHorizontal: SPACING.XS + 2,
+    paddingVertical: SPACING.XXS + 1,
+    borderRadius: RADIUS.PILL,
+    backgroundColor: COLORS.ACCENT_LIGHT,
+    borderWidth: 1,
+    borderColor: COLORS.ACCENT,
+  },
+  savedCategoryText: {
+    color: COLORS.ACCENT_DARK,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    fontFamily: FONT_SANS,
   },
   savedName: {
-    color: COLORS.ACCENT,
-    fontSize: 15,
-    fontWeight: "700",
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: TYPOGRAPHY.TITLE - 1,
+    fontWeight: "800",
     fontFamily: FONT_SANS,
-    marginBottom: 6,
+    lineHeight: 24,
+  },
+  savedPriceBadge: {
+    minHeight: 44,
+    borderRadius: RADIUS.MD,
+    paddingHorizontal: SPACING.SM + 2,
+    paddingVertical: SPACING.SM - 2,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.SURFACE_RAISED,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+  },
+  savedPriceText: {
+    color: COLORS.ACCENT_DARK,
+    fontSize: 14,
+    fontWeight: "800",
+    fontFamily: FONT_SANS,
   },
   savedMeta: {
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: TYPOGRAPHY.BODY - 1,
+    lineHeight: 20,
     fontFamily: FONT_SANS,
   },
   savedMetaLabel: {
@@ -349,41 +467,71 @@ const styles = StyleSheet.create({
   },
   editableCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
+    borderRadius: RADIUS.XL,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    padding: 16,
-    gap: 12,
-    marginBottom: 10,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    padding: SPACING.LG - 2,
+    gap: SPACING.SM + 2,
+    marginBottom: SPACING.SM,
     ...EDITABLE_CARD_SHADOW,
+  },
+  editableCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: SPACING.SM,
   },
   itemNumber: {
     color: COLORS.ACCENT,
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "800",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    fontFamily: FONT_SANS,
+  },
+  removeChipButton: {
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS - 1,
+    borderRadius: RADIUS.PILL,
+    backgroundColor: COLORS.DANGER_BG,
+    borderWidth: 1,
+    borderColor: COLORS.DANGER,
+  },
+  removeChipButtonText: {
+    color: COLORS.DANGER_DARK,
+    fontSize: 12,
+    fontWeight: "800",
     letterSpacing: 0.4,
     fontFamily: FONT_SANS,
+  },
+  buttonLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: SPACING.XS,
   },
   fieldShell: {
     position: "relative",
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    backgroundColor: COLORS.SURFACE,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingTop: 20,
-    paddingBottom: 10,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    borderRadius: RADIUS.MD,
+    paddingHorizontal: SPACING.SM + 2,
+    paddingTop: SPACING.LG + 2,
+    paddingBottom: SPACING.SM,
   },
   fieldShellMultiline: {
-    minHeight: 92,
+    minHeight: 108,
   },
   fieldLabel: {
     position: "absolute",
-    top: 8,
-    left: 12,
+    top: SPACING.XS + 1,
+    left: SPACING.SM + 2,
     fontSize: 11,
-    color: "#888888",
-    fontWeight: "500",
+    color: COLORS.TEXT_MUTED,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
     fontFamily: FONT_SANS,
   },
   fieldInput: {
@@ -396,64 +544,93 @@ const styles = StyleSheet.create({
     ...WEB_TEXT_INPUT_RESET,
   },
   fieldInputMultiline: {
-    minHeight: 58,
+    minHeight: 64,
     textAlignVertical: "top",
+  },
+  actionsPanel: {
+    marginTop: SPACING.XS,
+    marginBottom: SPACING.SM,
+    borderRadius: RADIUS.XL,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    backgroundColor: COLORS.SURFACE,
+    padding: SPACING.LG - 2,
+    gap: SPACING.SM - 2,
+    ...EDITABLE_CARD_SHADOW,
+  },
+  actionsTitle: {
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: TYPOGRAPHY.TITLE - 1,
+    fontWeight: "800",
+    fontFamily: FONT_SANS,
+  },
+  actionsSubtitle: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: TYPOGRAPHY.BODY - 1,
+    lineHeight: 20,
+    fontFamily: FONT_SANS,
   },
   actionRow: {
     flexDirection: "row",
-    gap: 10,
-    paddingTop: 4,
+    flexWrap: "wrap",
+    gap: SPACING.SM - 2,
+    paddingTop: SPACING.XXS,
   },
   secondaryButton: {
     flex: 1,
-    minHeight: 50,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: "#CCCCCC",
-    backgroundColor: COLORS.SURFACE,
+    minHeight: 54,
+    minWidth: 180,
+    borderRadius: RADIUS.MD,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    backgroundColor: COLORS.SURFACE_RAISED,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 14,
+    paddingHorizontal: SPACING.LG - 2,
   },
   secondaryButtonText: {
     color: COLORS.TEXT_PRIMARY,
     fontSize: 14,
-    fontWeight: "600",
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   primaryWideButton: {
     flex: 1.3,
-    minHeight: 50,
-    borderRadius: 10,
+    minHeight: 54,
+    minWidth: 220,
+    borderRadius: RADIUS.MD,
     backgroundColor: COLORS.ACCENT,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 16,
+    paddingHorizontal: SPACING.LG,
   },
   primaryWideButtonText: {
     color: COLORS.SURFACE,
     fontSize: 14,
-    fontWeight: "700",
+    fontWeight: "800",
+    letterSpacing: 0.2,
     fontFamily: FONT_SANS,
   },
   skeletonCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 10,
-    padding: 16,
-    marginBottom: 8,
-    height: 72,
+    borderRadius: RADIUS.XL,
+    padding: SPACING.LG - 2,
+    marginBottom: SPACING.SM,
+    height: 88,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
   },
   skeletonTitle: {
     backgroundColor: COLORS.BORDER,
-    borderRadius: 4,
-    height: 14,
-    width: "60%",
-    marginBottom: 8,
+    borderRadius: 999,
+    height: 15,
+    width: "58%",
+    marginBottom: 10,
   },
   skeletonSubtitle: {
     backgroundColor: COLORS.BORDER,
-    borderRadius: 4,
-    height: 11,
-    width: "40%",
+    borderRadius: 999,
+    height: 12,
+    width: "36%",
   },
 })
