@@ -26,9 +26,9 @@ import {
   useWindowDimensions,
   View,
 } from "react-native"
-import type { ImageStyle, KeyboardEvent, ViewStyle } from "react-native"
+import type { ImageStyle, KeyboardEvent, StyleProp, TextStyle, ViewStyle } from "react-native"
 import { COLORS } from "../constants/colors"
-import { FONT_MONO, FONT_SANS, INPUT_PLACEHOLDER_COLOR, SAFE_AREA } from "../constants/layout"
+import { FONT_MONO, FONT_SANS, INPUT_PLACEHOLDER_COLOR, RADIUS, SAFE_AREA, SPACING, TYPOGRAPHY } from "../constants/layout"
 import {
   clearSession,
   completeAuthRedirectFromUrl,
@@ -51,10 +51,12 @@ import {
   replaceRestaurantMenuItems,
   saveBillingConfig,
   saveRestaurantOrder,
+  saveRestaurantPaymentPin,
   saveRestaurant,
   updateRestaurantOrderPayment,
   saveVoiceAgentLink,
 } from "../db"
+import { useRestaurantRealtime } from "../hooks/useRestaurantRealtime"
 import { getSupportedBillingCountry, SUPPORTED_BILLING_COUNTRIES } from "../constants/billing"
 import { createEmptyMenuItem, parseMenuText } from "../menu-parser"
 import { parseMenuFromImageWithGemini } from "../gemini-parser"
@@ -82,6 +84,15 @@ import type {
 } from "../types"
 import { billingConfigToDraftBreakdown, getTipAmountFromPercent, normalizeOrderBillingBreakdown } from "../utils/billing"
 import {
+  cacheRecordingAudio,
+  getCachedRecordingUri,
+  loadCachedRestaurantSnapshot,
+  loadCachedRestaurants,
+  saveCachedRestaurantSnapshot,
+  saveCachedRestaurants,
+  type RestaurantOfflineSnapshot,
+} from "../utils/offlineCache"
+import {
   generateCombinedReceiptHTML as generateCombinedReceiptHTMLUtil,
   generateReceiptHTML as generateReceiptHTMLUtil,
   printReceiptHtml,
@@ -89,6 +100,7 @@ import {
 import { getCurrencySymbol as getCurrencySymbolUtil } from "../utils/formatters"
 import { CallReviewModal } from "../modals/CallReviewModal"
 import { ReceiptPreviewModal } from "../modals/ReceiptPreviewModal"
+import { AppIcon, type AppIconName } from "../components/AppIcon"
 import { ChannelBadge } from "../components/ChannelBadge"
 import { Sidebar } from "../components/Sidebar"
 import { MenuScreen } from "./MenuScreen"
@@ -96,7 +108,6 @@ import { createRestaurantVoiceAgent, ELEVENLABS_API_ORIGIN } from "../workspace-
 
 const ELEVENLABS_API_KEY_STORAGE_PREFIX = "restaurant-elevenlabs-api-key:"
 const PRINT_PREFERENCES_STORAGE_PREFIX = "restaurant-print-preferences:"
-const ORDER_ALERT_POLL_INTERVAL_MS = 8000
 
 type PrintPreferencesState = {
   autoPrintEnabled: boolean
@@ -335,80 +346,80 @@ const THEME = {
   text: COLORS.TEXT_PRIMARY,
   mutedText: COLORS.TEXT_SECONDARY,
   primary: COLORS.ACCENT,
-  primarySoft: COLORS.SURFACE_RAISED,
+  primarySoft: COLORS.ACCENT_LIGHT,
   accent: COLORS.ACCENT,
-  accentSoft: COLORS.BORDER,
+  accentSoft: COLORS.SURFACE_BORDER_SOFT,
   chip: COLORS.SURFACE_RAISED,
-  chipBorder: COLORS.BORDER,
+  chipBorder: COLORS.SURFACE_BORDER_SOFT,
   chipText: COLORS.TEXT_SECONDARY,
   activeTextDark: COLORS.SURFACE,
-  loadingOverlay: "rgba(248, 249, 250, 0.76)",
+  loadingOverlay: "rgba(244, 241, 234, 0.76)",
 }
 
 const CARD_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px 8px 12px rgba(4, 11, 21, 0.35)",
+      boxShadow: "0px 20px 48px rgba(8, 16, 29, 0.10)",
     }
   : {
       shadowColor: COLORS.SHADOW,
-      shadowOffset: { width: 0, height: 8 },
-      shadowOpacity: 0.35,
-      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 14 },
+      shadowOpacity: 0.12,
+      shadowRadius: 24,
     }) as Record<string, unknown>
 
 const METRIC_CARD_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px 6px 10px rgba(4, 11, 21, 0.28)",
+      boxShadow: "0px 14px 30px rgba(8, 16, 29, 0.08)",
     }
   : {
       shadowColor: COLORS.SHADOW,
-      shadowOffset: { width: 0, height: 6 },
-      shadowOpacity: 0.28,
-      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 10 },
+      shadowOpacity: 0.09,
+      shadowRadius: 18,
     }) as Record<string, unknown>
 
 const SOFT_CARD_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px 3px 8px rgba(0, 0, 0, 0.06)",
+      boxShadow: "0px 10px 24px rgba(8, 16, 29, 0.06)",
     }
   : {
-      shadowColor: "#000000",
-      shadowOffset: { width: 0, height: 3 },
-      shadowOpacity: 0.06,
-      shadowRadius: 8,
+      shadowColor: COLORS.SHADOW,
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.07,
+      shadowRadius: 14,
     }) as Record<string, unknown>
 
 const FAB_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px 4px 8px rgba(0, 0, 0, 0.2)",
+      boxShadow: "0px 16px 24px rgba(8, 16, 29, 0.16)",
     }
   : {
       shadowColor: COLORS.SHADOW,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.2,
-      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 12 },
+      shadowOpacity: 0.16,
+      shadowRadius: 18,
     }) as Record<string, unknown>
 
 const PAPER_CARD_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px 4px 8px rgba(0, 0, 0, 0.4)",
+      boxShadow: "0px 22px 42px rgba(0, 0, 0, 0.22)",
     }
   : {
       shadowColor: COLORS.SHADOW,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.4,
-      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 14 },
+      shadowOpacity: 0.22,
+      shadowRadius: 20,
     }) as Record<string, unknown>
 
 const SHEET_CARD_SHADOW = (Platform.OS === "web"
   ? {
-      boxShadow: "0px -4px 12px rgba(0, 0, 0, 0.16)",
+      boxShadow: "0px -12px 30px rgba(8, 16, 29, 0.10)",
     }
   : {
       shadowColor: COLORS.SHADOW,
-      shadowOffset: { width: 0, height: -4 },
-      shadowOpacity: 0.16,
-      shadowRadius: 12,
+      shadowOffset: { width: 0, height: -8 },
+      shadowOpacity: 0.1,
+      shadowRadius: 18,
     }) as Record<string, unknown>
 
 const WEB_TEXT_INPUT_RESET = (Platform.OS === "web"
@@ -424,6 +435,23 @@ const NOTICE_TIMEOUT_MS = 4500
 const ORDER_STATUS_PENDING = COLORS.WARNING
 const ORDER_STATUS_COMPLETE = COLORS.SUCCESS
 const ORDER_STATUS_CANCELLED = COLORS.DANGER
+
+type ButtonLabelProps = {
+  icon: AppIconName
+  label: string
+  color: string
+  size?: number
+  textStyle: StyleProp<TextStyle>
+}
+
+function ButtonLabel({ icon, label, color, size = 16, textStyle }: ButtonLabelProps) {
+  return (
+    <View style={styles.buttonLabelRow}>
+      <AppIcon name={icon} size={size} color={color} />
+      <Text style={textStyle}>{label}</Text>
+    </View>
+  )
+}
 
 function stripTechnicalText(value: string) {
   return value
@@ -1899,10 +1927,10 @@ function ThermalPreviewModal({ visible, order, restaurantName, onClose, onPrint 
           <Text style={styles.thermalPreviewTitle}>Receipt Preview</Text>
           <View style={styles.thermalPreviewHeaderActions}>
             <Pressable style={styles.thermalPreviewPrintButton} onPress={onPrint}>
-              <Text style={styles.thermalPreviewPrintButtonText}>{"\u{1F5A8}\uFE0F Print"}</Text>
+              <ButtonLabel icon="printer" label="Print" color={COLORS.HEADER_TEXT} textStyle={styles.thermalPreviewPrintButtonText} />
             </Pressable>
             <Pressable style={styles.thermalPreviewCloseButton} onPress={onClose}>
-              <Text style={styles.thermalPreviewCloseButtonText}>{"\u2715 Close"}</Text>
+              <ButtonLabel icon="x" label="Close" color={COLORS.HEADER_TEXT} textStyle={styles.thermalPreviewCloseButtonText} />
             </Pressable>
           </View>
         </View>
@@ -2582,7 +2610,47 @@ function getOrderDraftKey(order: UiOrderDraft, index: number): string {
 }
 
 function hasCallReviewContent(callReview: RestaurantOrderRecord["callReview"]) {
-  return Boolean(callReview?.recordingUrl?.trim() || callReview?.transcriptText?.trim())
+  return Boolean(callReview?.localRecordingUri?.trim() || callReview?.recordingUrl?.trim() || callReview?.transcriptText?.trim())
+}
+
+function getCallReviewPlaybackUri(callReview: RestaurantOrderRecord["callReview"]) {
+  return callReview?.localRecordingUri?.trim() || callReview?.recordingUrl?.trim() || ""
+}
+
+function getCallReviewCacheKey(callReview: RestaurantOrderRecord["callReview"]) {
+  return callReview?.recordingStoragePath?.trim() || callReview?.recordingUrl?.trim() || ""
+}
+
+function setCallReviewLocalRecordingUri(
+  callReview: RestaurantOrderRecord["callReview"],
+  localRecordingUri: string,
+): RestaurantOrderRecord["callReview"] {
+  if (!callReview) {
+    return callReview
+  }
+
+  return {
+    ...callReview,
+    localRecordingUri,
+  } as RestaurantOrderRecord["callReview"]
+}
+
+function formatSyncTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return ""
+  }
+
+  const parsedDate = new Date(value)
+  if (Number.isNaN(parsedDate.getTime())) {
+    return ""
+  }
+
+  return parsedDate.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })
 }
 
 function parseTranscriptEntries(transcriptText: string) {
@@ -2680,6 +2748,8 @@ export default function App() {
   })
   const isTablet = viewportWidth >= 768
   const isLandscape = viewportWidth > viewportHeight
+  const showPosSidebar = isTablet && isLandscape
+  const usePosGridLayout = isTablet && isLandscape
   const isTabletLandscape = isTablet && isLandscape
   const isWideTabletLandscape = isTabletLandscape && viewportWidth >= 1280
   const isCompactViewport = viewportWidth < 640
@@ -2733,6 +2803,8 @@ export default function App() {
   const [restaurantName, setRestaurantName] = useState("")
   const [restaurantPhone, setRestaurantPhone] = useState("")
   const [restaurantAddress, setRestaurantAddress] = useState("")
+  const [restaurantPaymentPin, setRestaurantPaymentPin] = useState("")
+  const [restaurantPaymentPinConfirm, setRestaurantPaymentPinConfirm] = useState("")
   const [billingConfig, setBillingConfig] = useState<BillingConfig | null>(null)
   const selectedCurrencyCode = billingConfig?.currencyCode || selectedRestaurant?.currencyCode || DEFAULT_CURRENCY_CODE
 
@@ -2748,6 +2820,9 @@ export default function App() {
   const [menuLoading, setMenuLoading] = useState(false)
   const [orders, setOrders] = useState<RestaurantOrderRecord[]>([])
   const [orderDrafts, setOrderDrafts] = useState<UiOrderDraft[]>([])
+  const [isOfflineMode, setIsOfflineMode] = useState(false)
+  const [isSyncingRestaurantData, setIsSyncingRestaurantData] = useState(false)
+  const [restaurantDataLastSyncedAt, setRestaurantDataLastSyncedAt] = useState<string | null>(null)
   const [printPreferences, setPrintPreferences] = useState<PrintPreferencesState>(DEFAULT_PRINT_PREFERENCES)
   const [availablePrinterOptions, setAvailablePrinterOptions] = useState<PrinterOption[]>(() => getDefaultPrinterOptions())
   const [isPrintCenterVisible, setIsPrintCenterVisible] = useState(false)
@@ -2764,7 +2839,8 @@ export default function App() {
     callReview: RestaurantOrderRecord["callReview"]
   } | null>(null)
   const [activePaymentUpdate, setActivePaymentUpdate] = useState<ActivePaymentUpdateState | null>(null)
-  const callReviewPlayer = useAudioPlayer(activeCallReview?.callReview?.recordingUrl?.trim() || undefined, { updateInterval: 250 })
+  const activeCallReviewPlaybackUri = getCallReviewPlaybackUri(activeCallReview?.callReview || null)
+  const callReviewPlayer = useAudioPlayer(activeCallReviewPlaybackUri || undefined, { updateInterval: 250 })
   const callReviewPlayerStatus = useAudioPlayerStatus(callReviewPlayer)
   const newOrderChimePlayer = useAudioPlayer(require("../../assets/audio/order-chime.wav"), { updateInterval: 250 })
   const newOrderChimeStatus = useAudioPlayerStatus(newOrderChimePlayer)
@@ -2780,6 +2856,19 @@ export default function App() {
   const [isEditingElevenLabsApiKey, setIsEditingElevenLabsApiKey] = useState(false)
   const [manualAgentId, setManualAgentId] = useState("")
   const [voiceAgentLink, setVoiceAgentLink] = useState<VoiceAgentLinkRecord | null>(null)
+  const orderRefreshPaused =
+    busy || Boolean(activeOrderEditor) || Boolean(activeOrderItemPicker) || Boolean(activeItemCustomization) || Boolean(activePaymentUpdate)
+  const orderRealtimeStatus = useRestaurantRealtime({
+    restaurantId: selectedRestaurant?.id || null,
+    enabled: Boolean(user?.id && selectedRestaurant?.id && !orderRefreshPaused),
+    onRestaurantChange: () => {
+      if (!selectedRestaurant?.id || orderRefreshInFlightRef.current) {
+        return
+      }
+
+      void refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: false, showRefreshErrors: false })
+    },
+  })
 
   function clearQueuedNewOrderSpeechTimeout() {
     if (!newOrderSpeechTimeoutRef.current) {
@@ -2860,6 +2949,180 @@ export default function App() {
     queuedNewOrderAlertCountsRef.current.push(count)
     if (!newOrderAlertInFlightRef.current) {
       finishQueuedNewOrderAlert()
+    }
+  }
+
+  async function hydrateOrdersWithCachedAudio(nextOrders: RestaurantOrderRecord[]) {
+    return await Promise.all(
+      nextOrders.map(async (order) => {
+        const recordingUrl = order.callReview?.recordingUrl?.trim() || ""
+        const recordingCacheKey = getCallReviewCacheKey(order.callReview)
+        if (!recordingUrl || !recordingCacheKey) {
+          return order
+        }
+
+        const localRecordingUri = await getCachedRecordingUri(recordingCacheKey)
+        if (!localRecordingUri) {
+          return order
+        }
+
+        return {
+          ...order,
+          callReview: setCallReviewLocalRecordingUri(order.callReview, localRecordingUri),
+        }
+      }),
+    )
+  }
+
+  function applyLocalRecordingUri(recordingCacheKey: string, localRecordingUri: string) {
+    const normalizedKey = recordingCacheKey.trim()
+    const normalizedLocalUri = localRecordingUri.trim()
+    if (!normalizedKey || !normalizedLocalUri) {
+      return
+    }
+
+    setOrders((current) =>
+      current.map((order) =>
+        getCallReviewCacheKey(order.callReview) === normalizedKey
+          ? {
+              ...order,
+              callReview: setCallReviewLocalRecordingUri(order.callReview, normalizedLocalUri),
+            }
+          : order,
+      ),
+    )
+    setOrderDrafts((current) =>
+      current.map((order) =>
+        getCallReviewCacheKey(order.callReview) === normalizedKey
+          ? {
+              ...order,
+              callReview: setCallReviewLocalRecordingUri(order.callReview, normalizedLocalUri),
+            }
+          : order,
+      ),
+    )
+    setActiveCallReview((current) =>
+      current && getCallReviewCacheKey(current.callReview) === normalizedKey
+        ? {
+            ...current,
+            callReview: setCallReviewLocalRecordingUri(current.callReview, normalizedLocalUri),
+          }
+        : current,
+    )
+  }
+
+  async function ensureLocalCallRecording(callReview: RestaurantOrderRecord["callReview"]) {
+    const normalizedUrl = callReview?.recordingUrl?.trim() || ""
+    const recordingCacheKey = getCallReviewCacheKey(callReview)
+    if (!normalizedUrl || !recordingCacheKey) {
+      return null
+    }
+
+    const localRecordingUri = await cacheRecordingAudio(normalizedUrl, recordingCacheKey)
+    if (localRecordingUri) {
+      applyLocalRecordingUri(recordingCacheKey, localRecordingUri)
+    }
+    return localRecordingUri
+  }
+
+  async function prefetchRecentCallReviewAudio(nextOrders: RestaurantOrderRecord[]) {
+    const recentCallReviews = nextOrders
+      .map((order) => order.callReview || null)
+      .filter((callReview, index, values) => {
+        const cacheKey = getCallReviewCacheKey(callReview)
+        return Boolean(callReview?.recordingUrl?.trim() && cacheKey) && values.findIndex((entry) => getCallReviewCacheKey(entry) === cacheKey) === index
+      })
+      .slice(0, 6)
+
+    await Promise.allSettled(recentCallReviews.map((callReview) => ensureLocalCallRecording(callReview)))
+  }
+
+  function applyRestaurantSnapshot(
+    snapshot: Pick<RestaurantOfflineSnapshot, "savedAt" | "menuItems" | "orders" | "voiceAgentLink" | "billingConfig">,
+  ) {
+    const uniqueItems = dedupeMenuItems(snapshot.menuItems)
+    setSavedItems(uniqueItems)
+    setEditableMenuItems(toUiMenuItems(uniqueItems))
+    setOrders(snapshot.orders)
+    setOrderDrafts(snapshot.orders.map(orderToUiDraft))
+    setVoiceAgentLink(snapshot.voiceAgentLink)
+    setManualAgentId(snapshot.voiceAgentLink?.workspace_agent_id || "")
+    setBillingConfig(snapshot.billingConfig)
+    setRestaurantDataLastSyncedAt(snapshot.savedAt)
+    knownOrderIdsRef.current = new Set(
+      snapshot.orders.map((order) => String(order.id || "").trim()).filter((orderId) => orderId.length > 0),
+    )
+  }
+
+  async function persistRestaurantSnapshot(params: {
+    restaurantId: string
+    menuItems?: MenuItemDraft[]
+    orders?: RestaurantOrderRecord[]
+    voiceAgentLink?: VoiceAgentLinkRecord | null
+    billingConfig?: BillingConfig | null
+    savedAt?: string
+  }) {
+    const savedAt = params.savedAt || new Date().toISOString()
+    await saveCachedRestaurantSnapshot({
+      restaurantId: params.restaurantId,
+      savedAt,
+      menuItems: params.menuItems ?? savedItems,
+      orders: params.orders ?? orders,
+      voiceAgentLink: params.voiceAgentLink === undefined ? voiceAgentLink : params.voiceAgentLink,
+      billingConfig: params.billingConfig === undefined ? billingConfig : params.billingConfig,
+    })
+    setRestaurantDataLastSyncedAt(savedAt)
+  }
+
+  async function syncSelectedRestaurantData(options?: { showSuccessNotice?: boolean }) {
+    if (!selectedRestaurant) {
+      return
+    }
+
+    setBusy(true)
+    setIsSyncingRestaurantData(true)
+
+    try {
+      const [items, fetchedOrders, nextVoiceAgentLink, nextBillingConfig] = await Promise.all([
+        listRestaurantMenuItems(selectedRestaurant.id),
+        listRestaurantOrders(selectedRestaurant.id),
+        getVoiceAgentLink(selectedRestaurant.id),
+        getBillingConfig(selectedRestaurant.id),
+      ])
+      const hydratedOrders = await hydrateOrdersWithCachedAudio(fetchedOrders)
+      const savedAt = new Date().toISOString()
+
+      applyRestaurantSnapshot({
+        savedAt,
+        menuItems: items,
+        orders: hydratedOrders,
+        voiceAgentLink: nextVoiceAgentLink,
+        billingConfig: nextBillingConfig,
+      })
+      setIsOfflineMode(false)
+      await persistRestaurantSnapshot({
+        restaurantId: selectedRestaurant.id,
+        savedAt,
+        menuItems: dedupeMenuItems(items),
+        orders: hydratedOrders,
+        voiceAgentLink: nextVoiceAgentLink,
+        billingConfig: nextBillingConfig,
+      })
+      void prefetchRecentCallReviewAudio(hydratedOrders)
+
+      if (options?.showSuccessNotice) {
+        showNotification("Synced", "Latest changes are loaded for this restaurant.", "success")
+      }
+    } catch (error) {
+      setIsOfflineMode(true)
+      showNotification(
+        "Sync Failed",
+        error instanceof Error ? error.message : "Couldn't load the latest changes. Cached data stays available.",
+        "warning",
+      )
+    } finally {
+      setIsSyncingRestaurantData(false)
+      setBusy(false)
     }
   }
 
@@ -3049,7 +3312,9 @@ export default function App() {
     if (!user) {
       return
     }
-    refreshRestaurants(user.id)
+    void refreshRestaurants(user.id).catch((error) => {
+      showNotification("Load Failed", error instanceof Error ? error.message : "Failed to load restaurants.", "error")
+    })
   }, [user])
 
   useEffect(() => {
@@ -3100,6 +3365,8 @@ export default function App() {
       setRestaurantName("")
       setRestaurantPhone("")
       setRestaurantAddress("")
+      setIsOfflineMode(false)
+      setRestaurantDataLastSyncedAt(null)
       setBillingConfig(null)
       setImageUri(null)
       setImageBase64("")
@@ -3123,6 +3390,8 @@ export default function App() {
       setSavedElevenLabsApiKey("")
       setIsEditingElevenLabsApiKey(false)
       setManualAgentId("")
+      setRestaurantPaymentPin("")
+      setRestaurantPaymentPinConfirm("")
       setPrintPreferences(DEFAULT_PRINT_PREFERENCES)
       setAvailablePrinterOptions(getDefaultPrinterOptions())
       setIsPrintCenterVisible(false)
@@ -3134,13 +3403,22 @@ export default function App() {
     setRestaurantName(selectedRestaurant.name)
     setRestaurantPhone(selectedRestaurant.phone || "")
     setRestaurantAddress(selectedRestaurant.address || "")
+    setRestaurantPaymentPin("")
+    setRestaurantPaymentPinConfirm("")
+    setIsOfflineMode(false)
+    setRestaurantDataLastSyncedAt(null)
     setBillingConfig(null)
     setImageUri(null)
     setImageBase64("")
     setRawMenuText("")
     setScanId(null)
     setDraftItems([])
+    setSavedItems([])
+    setEditableMenuItems([])
     setMenuLoading(true)
+    setOrders([])
+    setOrderDrafts([])
+    setPreviewOrder(null)
     setPrintPreferences(DEFAULT_PRINT_PREFERENCES)
     setAvailablePrinterOptions(getDefaultPrinterOptions())
     setIsPrinterDropdownOpen(false)
@@ -3150,37 +3428,88 @@ export default function App() {
     setActiveItemCustomization(null)
     setOrderItemPickerSearch("")
     setActiveCallReview(null)
+    setVoiceAgentLink(null)
+    setElevenLabsApiKey("")
+    setSavedElevenLabsApiKey("")
+    setIsEditingElevenLabsApiKey(false)
+    setManualAgentId("")
     ;(async () => {
       try {
-        const [items, fetchedOrders, voiceLink, storedApiKey, storedPrintPreferences, loadedBillingConfig] = await Promise.all([
-          listRestaurantMenuItems(selectedRestaurant.id),
-          listRestaurantOrders(selectedRestaurant.id),
-          getVoiceAgentLink(selectedRestaurant.id),
+        const [storedApiKey, storedPrintPreferences, cachedSnapshot] = await Promise.all([
           loadStoredElevenLabsApiKey(selectedRestaurant.id),
           loadStoredPrintPreferences(selectedRestaurant.id),
-          getBillingConfig(selectedRestaurant.id),
+          loadCachedRestaurantSnapshot(selectedRestaurant.id),
         ])
 
         if (cancelled) {
           return
         }
 
-        const uniqueItems = dedupeMenuItems(items)
-        setSavedItems(uniqueItems)
-        setEditableMenuItems(toUiMenuItems(uniqueItems))
-        setOrders(fetchedOrders)
-        setOrderDrafts(fetchedOrders.map(orderToUiDraft))
-        setVoiceAgentLink(voiceLink)
         setSavedElevenLabsApiKey(storedApiKey)
         setElevenLabsApiKey(storedApiKey)
-        setIsEditingElevenLabsApiKey(Boolean(voiceLink) && !storedApiKey)
-        setManualAgentId(voiceLink?.workspace_agent_id || "")
-        setBillingConfig(loadedBillingConfig)
         setPrintPreferences(storedPrintPreferences)
         setAvailablePrinterOptions(mergePrinterOptions(getDefaultPrinterOptions(), getStoredPrinterOption(storedPrintPreferences)))
-        knownOrderIdsRef.current = new Set(
-          fetchedOrders.map((order) => String(order.id || "").trim()).filter((orderId) => orderId.length > 0),
-        )
+
+        if (cachedSnapshot) {
+          const hydratedCachedOrders = await hydrateOrdersWithCachedAudio(cachedSnapshot.orders)
+          if (cancelled) {
+            return
+          }
+
+          applyRestaurantSnapshot({
+            savedAt: cachedSnapshot.savedAt,
+            menuItems: cachedSnapshot.menuItems,
+            orders: hydratedCachedOrders,
+            voiceAgentLink: cachedSnapshot.voiceAgentLink,
+            billingConfig: cachedSnapshot.billingConfig,
+          })
+          setIsEditingElevenLabsApiKey(Boolean(cachedSnapshot.voiceAgentLink) && !storedApiKey)
+        }
+
+        try {
+          const [items, fetchedOrders, voiceLink, loadedBillingConfig] = await Promise.all([
+            listRestaurantMenuItems(selectedRestaurant.id),
+            listRestaurantOrders(selectedRestaurant.id),
+            getVoiceAgentLink(selectedRestaurant.id),
+            getBillingConfig(selectedRestaurant.id),
+          ])
+          const hydratedOrders = await hydrateOrdersWithCachedAudio(fetchedOrders)
+          if (cancelled) {
+            return
+          }
+
+          const savedAt = new Date().toISOString()
+          applyRestaurantSnapshot({
+            savedAt,
+            menuItems: items,
+            orders: hydratedOrders,
+            voiceAgentLink: voiceLink,
+            billingConfig: loadedBillingConfig,
+          })
+          setIsEditingElevenLabsApiKey(Boolean(voiceLink) && !storedApiKey)
+          setIsOfflineMode(false)
+          await persistRestaurantSnapshot({
+            restaurantId: selectedRestaurant.id,
+            savedAt,
+            menuItems: dedupeMenuItems(items),
+            orders: hydratedOrders,
+            voiceAgentLink: voiceLink,
+            billingConfig: loadedBillingConfig,
+          })
+          void prefetchRecentCallReviewAudio(hydratedOrders)
+        } catch (error) {
+          if (cancelled) {
+            return
+          }
+
+          if (cachedSnapshot) {
+            setIsOfflineMode(true)
+            return
+          }
+
+          const message = error instanceof Error ? error.message : "Failed to load restaurant data."
+          showNotification("Load Failed", message)
+        }
       } catch (error) {
         if (cancelled) {
           return
@@ -3261,44 +3590,26 @@ export default function App() {
     } catch {}
   }, [newOrderChimePlayer, selectedRestaurantId])
 
-  useEffect(() => {
-    if (!user || !selectedRestaurant?.id) {
-      return
-    }
-
-    const intervalId = setInterval(() => {
-      if (
-        busy ||
-        orderRefreshInFlightRef.current ||
-        activeOrderEditor ||
-        activeOrderItemPicker ||
-        activeItemCustomization ||
-        activePaymentUpdate
-      ) {
+  async function refreshRestaurants(ownerUserId: string) {
+    try {
+      const rows = await listRestaurants(ownerUserId)
+      setRestaurants(rows)
+      await saveCachedRestaurants(rows)
+      if (rows.length > 0) {
+        setSelectedRestaurantId((previousValue) => previousValue || rows[0].id)
+      } else {
+        setSelectedRestaurantId(null)
+      }
+    } catch (error) {
+      const cachedRows = await loadCachedRestaurants()
+      if (cachedRows.length > 0) {
+        setRestaurants(cachedRows)
+        setSelectedRestaurantId((previousValue) => previousValue || cachedRows[0].id)
+        setIsOfflineMode(true)
         return
       }
 
-      void refreshOrders(selectedRestaurant.id, { suppressNewOrderExperience: false, showRefreshErrors: false })
-    }, ORDER_ALERT_POLL_INTERVAL_MS)
-
-    return () => clearInterval(intervalId)
-  }, [
-    activeItemCustomization,
-    activeOrderEditor,
-    activeOrderItemPicker,
-    activePaymentUpdate,
-    busy,
-    selectedRestaurant?.id,
-    user?.id,
-  ])
-
-  async function refreshRestaurants(ownerUserId: string) {
-    const rows = await listRestaurants(ownerUserId)
-    setRestaurants(rows)
-    if (rows.length > 0) {
-      setSelectedRestaurantId((previousValue) => previousValue || rows[0].id)
-    } else {
-      setSelectedRestaurantId(null)
+      throw error
     }
   }
 
@@ -3317,23 +3628,34 @@ export default function App() {
         listRestaurantOrders(restaurantId),
         listRestaurantMenuItems(restaurantId),
       ])
+      const hydratedOrders = await hydrateOrdersWithCachedAudio(fetchedOrders)
+      const uniqueItems = dedupeMenuItems(fetchedMenuItems)
       const nextKnownOrderIds = new Set(
-        fetchedOrders.map((order) => String(order.id || "").trim()).filter((orderId) => orderId.length > 0),
+        hydratedOrders.map((order) => String(order.id || "").trim()).filter((orderId) => orderId.length > 0),
       )
-      const newOrders = fetchedOrders.filter((order) => {
+      const newOrders = hydratedOrders.filter((order) => {
         const orderId = String(order.id || "").trim()
         return orderId.length > 0 && !knownOrderIdsRef.current.has(orderId)
       })
 
       knownOrderIdsRef.current = nextKnownOrderIds
-      setSavedItems(dedupeMenuItems(fetchedMenuItems))
-      setOrders(fetchedOrders)
-      setOrderDrafts(fetchedOrders.map(orderToUiDraft))
+      setSavedItems(uniqueItems)
+      setOrders(hydratedOrders)
+      setOrderDrafts(hydratedOrders.map(orderToUiDraft))
+      setIsOfflineMode(false)
+      setRestaurantDataLastSyncedAt(new Date().toISOString())
+      await persistRestaurantSnapshot({
+        restaurantId,
+        menuItems: uniqueItems,
+        orders: hydratedOrders,
+      })
+      void prefetchRecentCallReviewAudio(hydratedOrders)
 
       if (!options?.suppressNewOrderExperience && newOrders.length > 0) {
         void handleIncomingOrders(newOrders)
       }
     } catch (error) {
+      setIsOfflineMode(true)
       if (options?.showRefreshErrors === false) {
         console.error("Background order refresh error:", error)
         return
@@ -3585,7 +3907,7 @@ export default function App() {
         {passwordRules.map((rule) => (
           <View key={rule.label} style={styles.authGuidelineRow}>
             <View style={[styles.authGuidelineCheck, rule.met ? styles.authGuidelineCheckMet : null]}>
-              <Text style={styles.authGuidelineCheckText}>✓</Text>
+              <AppIcon name="check" size={12} color={rule.met ? COLORS.SURFACE : COLORS.TEXT_MUTED} />
             </View>
             <Text style={styles.authGuidelineText}>{rule.label}</Text>
           </View>
@@ -3725,7 +4047,11 @@ export default function App() {
       showNotification("Call Review", "The call details are not ready yet.")
       return
     }
+
     setActiveCallReview({ title, callReview })
+    if (callReview?.recordingUrl?.trim()) {
+      void ensureLocalCallRecording(callReview)
+    }
   }
 
   function openPaymentUpdateModal(index: number) {
@@ -3844,14 +4170,19 @@ export default function App() {
     setActiveCallReview(null)
   }
 
-  async function handleOpenCallRecording(recordingUrl: string) {
-    const normalizedUrl = recordingUrl.trim()
-    if (!normalizedUrl) {
+  async function handleOpenCallRecording() {
+    const playbackUri = getCallReviewPlaybackUri(activeCallReview?.callReview || null)
+    const remoteCallReview = activeCallReview?.callReview || null
+    if (!playbackUri) {
       showNotification("Call Review", "The call recording is not available yet.")
       return
     }
 
     try {
+      if (!activeCallReview?.callReview?.localRecordingUri?.trim() && remoteCallReview?.recordingUrl?.trim()) {
+        void ensureLocalCallRecording(remoteCallReview)
+      }
+
       if (callReviewPlayerStatus.playing) {
         callReviewPlayer.pause()
         return
@@ -3882,7 +4213,7 @@ export default function App() {
     }
 
     const transcriptText = activeCallReview.callReview?.transcriptText?.trim() || ""
-    const recordingUrl = activeCallReview.callReview?.recordingUrl?.trim() || ""
+    const recordingUrl = getCallReviewPlaybackUri(activeCallReview.callReview)
     const hasTranscript = transcriptText.length > 0
     const hasRecording = recordingUrl.length > 0
     const analysisStatus = activeCallReview.callReview?.analysisStatus?.trim()
@@ -3925,7 +4256,7 @@ export default function App() {
               </View>
             </View>
             <Pressable style={styles.callReviewCloseButton} onPress={closeOrderCallReview}>
-              <Text style={styles.callReviewCloseText}>Done</Text>
+              <ButtonLabel icon="check" label="Done" color={COLORS.TEXT_PRIMARY} textStyle={styles.callReviewCloseText} />
             </Pressable>
           </View>
 
@@ -3937,18 +4268,22 @@ export default function App() {
             <View style={styles.callReviewAudioRow}>
               <Pressable
                 style={[styles.callReviewAudioButton, !hasRecording ? styles.callReviewAudioButtonDisabled : null]}
-                onPress={hasRecording ? () => handleOpenCallRecording(recordingUrl) : undefined}
+                onPress={hasRecording ? () => handleOpenCallRecording() : undefined}
                 disabled={!hasRecording}
               >
-                <Text
+                <View
                   style={[
-                    styles.callReviewAudioIcon,
+                    styles.callReviewAudioIconWrap,
                     callReviewPlayerStatus.playing ? styles.callReviewAudioIconStop : styles.callReviewAudioIconPlay,
                     !hasRecording ? styles.callReviewAudioIconDisabled : null,
                   ]}
                 >
-                  {callReviewPlayerStatus.playing ? "\u25A0" : "\u25B6"}
-                </Text>
+                  {callReviewPlayerStatus.playing ? (
+                    <AppIcon name="square" size={18} color={COLORS.HEADER_TEXT} />
+                  ) : (
+                    <AppIcon name="play" size={20} color={COLORS.HEADER_TEXT} />
+                  )}
+                </View>
               </Pressable>
               {hasRecording ? (
                 <>
@@ -3975,9 +4310,10 @@ export default function App() {
                   return (
                     <View key={`transcript-entry-${index}`} style={[styles.callReviewTranscriptGroup, styles.callReviewTranscriptRowPadding]}>
                       <View style={styles.callReviewTranscriptAgentGroup}>
-                        <Text style={[styles.callReviewTranscriptSpeaker, styles.callReviewTranscriptSpeakerAgent]}>
-                          {"\u{1F916} AGENT"}
-                        </Text>
+                        <View style={styles.transcriptSpeakerRow}>
+                          <AppIcon name="mic" size={14} color={COLORS.VOICE_COLOR} />
+                          <Text style={[styles.callReviewTranscriptSpeaker, styles.callReviewTranscriptSpeakerAgent]}>Agent</Text>
+                        </View>
                         <View style={styles.callReviewTranscriptAgentBubble}>
                           <Text style={styles.callReviewTranscriptMessage}>{entry.message}</Text>
                         </View>
@@ -3993,9 +4329,10 @@ export default function App() {
                         <View style={styles.callReviewTranscriptUserBubble}>
                           <Text style={styles.callReviewTranscriptMessage}>{entry.message}</Text>
                         </View>
-                        <Text style={[styles.callReviewTranscriptSpeaker, styles.callReviewTranscriptSpeakerUser]}>
-                          {"\u{1F464} CUSTOMER"}
-                        </Text>
+                        <View style={styles.transcriptSpeakerRow}>
+                          <AppIcon name="user" size={14} color={COLORS.TEXT_SECONDARY} />
+                          <Text style={[styles.callReviewTranscriptSpeaker, styles.callReviewTranscriptSpeakerUser]}>Customer</Text>
+                        </View>
                       </View>
                     </View>
                   )
@@ -4047,6 +4384,57 @@ export default function App() {
       showNotification("Saved", "Restaurant profile saved.")
     } catch (error) {
       showNotification("Save Failed", error instanceof Error ? error.message : "Failed to save restaurant.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleSaveRestaurantPaymentPin() {
+    if (!selectedRestaurant) {
+      showNotification("Restaurant Required", "Create or select a restaurant first.", "warning")
+      return
+    }
+
+    const normalizedPin = restaurantPaymentPin.replace(/[^\d]/g, "")
+    const normalizedConfirmation = restaurantPaymentPinConfirm.replace(/[^\d]/g, "")
+
+    if (!/^\d{4,8}$/.test(normalizedPin)) {
+      showNotification("Validation", "Use a payment PIN that is 4 to 8 digits long.", "warning")
+      return
+    }
+
+    if (normalizedPin !== normalizedConfirmation) {
+      showNotification("Validation", "Payment PIN confirmation does not match.", "warning")
+      return
+    }
+
+    setBusy(true)
+    try {
+      await saveRestaurantPaymentPin({
+        restaurantId: selectedRestaurant.id,
+        pin: normalizedPin,
+      })
+
+      const nextRestaurants = restaurants.map((restaurant) =>
+        restaurant.id === selectedRestaurant.id
+          ? {
+              ...restaurant,
+              hasPaymentPin: true,
+            }
+          : restaurant,
+      )
+
+      setRestaurants(nextRestaurants)
+      await saveCachedRestaurants(nextRestaurants)
+      setRestaurantPaymentPin("")
+      setRestaurantPaymentPinConfirm("")
+      showNotification("Saved", "Restaurant payment PIN updated.", "success")
+    } catch (error) {
+      showNotification(
+        "Save Failed",
+        error instanceof Error ? error.message : "Failed to save the restaurant payment PIN.",
+        "error",
+      )
     } finally {
       setBusy(false)
     }
@@ -4170,6 +4558,7 @@ export default function App() {
       if (imageBase64) {
         try {
           const aiExtraction = await parseMenuFromImageWithGemini({
+            restaurantId: selectedRestaurant.id,
             imageBase64,
             imageMimeType,
             promptHint: rawMenuText.trim() || undefined,
@@ -4783,18 +5172,22 @@ export default function App() {
     setBusy(true)
     try {
       const savedConfig = await saveBillingConfig(billingConfig)
-      setBillingConfig(savedConfig)
-      setRestaurants((current) =>
-        current.map((restaurant) =>
-          restaurant.id === selectedRestaurant.id
-            ? {
-                ...restaurant,
-                countryCode: savedConfig.countryCode,
-                currencyCode: savedConfig.currencyCode,
-              }
-            : restaurant,
-        ),
+      const nextRestaurants = restaurants.map((restaurant) =>
+        restaurant.id === selectedRestaurant.id
+          ? {
+              ...restaurant,
+              countryCode: savedConfig.countryCode,
+              currencyCode: savedConfig.currencyCode,
+            }
+          : restaurant,
       )
+      setBillingConfig(savedConfig)
+      setRestaurants(nextRestaurants)
+      await saveCachedRestaurants(nextRestaurants)
+      await persistRestaurantSnapshot({
+        restaurantId: selectedRestaurant.id,
+        billingConfig: savedConfig,
+      })
       showNotification("Saved", "Billing settings updated.", "success")
     } catch (error) {
       showNotification(
@@ -5679,6 +6072,7 @@ export default function App() {
     const tipSuggestions = billingConfig?.tipSuggestions || []
     const showTipSuggestions = fulfillmentType === "pickup" && Boolean(billingConfig?.tipEnabled) && tipSuggestions.length > 0
     const canResetToUnpaid = paymentStatus === "paid"
+    const paymentModalMaxHeight = Math.max(360, viewportHeight - 40)
 
     return (
       <Modal
@@ -5690,7 +6084,13 @@ export default function App() {
       >
         <View style={styles.paymentModalOverlay}>
           <Pressable style={styles.paymentModalBackdrop} onPress={closePaymentUpdateModal} />
-          <View style={styles.paymentModalCard}>
+          <View style={[styles.paymentModalCard, { maxHeight: paymentModalMaxHeight }]}>
+            <ScrollView
+              style={styles.paymentModalScroll}
+              contentContainerStyle={styles.paymentModalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
             <Text style={styles.paymentModalTitle}>Update Payment</Text>
             <Text style={styles.paymentModalSubtitle}>
               {draft.customerName.trim() || "Guest"} · #{formatShortOrderCode(draft.shortOrderCode) || draft.id || activePaymentUpdate.index + 1}
@@ -5917,6 +6317,7 @@ export default function App() {
                 <Text style={styles.paymentModalCancelButtonText}>Cancel</Text>
               </Pressable>
             </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -6397,6 +6798,10 @@ export default function App() {
       const saved = dedupeMenuItems(await listRestaurantMenuItems(selectedRestaurant.id))
       setSavedItems(saved)
       setEditableMenuItems(toUiMenuItems(saved))
+      await persistRestaurantSnapshot({
+        restaurantId: selectedRestaurant.id,
+        menuItems: saved,
+      })
       showNotification("Saved", "Menu items and customizations stored in Supabase.")
     } catch (error) {
       showNotification("Save Failed", error instanceof Error ? error.message : "Failed to save menu.")
@@ -6427,6 +6832,10 @@ export default function App() {
       setSavedElevenLabsApiKey(elevenLabsApiKey.trim())
       setElevenLabsApiKey(elevenLabsApiKey.trim())
       setIsEditingElevenLabsApiKey(false)
+      await persistRestaurantSnapshot({
+        restaurantId: selectedRestaurant.id,
+        voiceAgentLink: link,
+      })
       showNotification("Connected", `Linked voice agent: ${created.agentId}`)
     } catch (error) {
       showNotification("Voice Agent Error", error instanceof Error ? error.message : "Failed to connect voice agent.")
@@ -6450,12 +6859,20 @@ export default function App() {
       })
       const link = await getVoiceAgentLink(selectedRestaurant.id)
       setVoiceAgentLink(link)
+      await persistRestaurantSnapshot({
+        restaurantId: selectedRestaurant.id,
+        voiceAgentLink: link,
+      })
       showNotification("Linked", "Existing ElevenLabs agent linked successfully.")
     } catch (error) {
       showNotification("Link Failed", error instanceof Error ? error.message : "Failed to link existing agent.")
     } finally {
       setBusy(false)
     }
+  }
+
+  async function handleSyncRestaurantData() {
+    await syncSelectedRestaurantData({ showSuccessNotice: true })
   }
 
   async function handleSaveElevenLabsApiKey() {
@@ -6491,7 +6908,7 @@ export default function App() {
     .filter(({ order }) => matchesOrderStatusFilter(order.status, statusFilter))
   const isSettingsMode = settingsReturnTab !== null
   const activeCallReviewTranscriptText = activeCallReview?.callReview?.transcriptText?.trim() || ""
-  const activeCallReviewRecordingUrl = activeCallReview?.callReview?.recordingUrl?.trim() || ""
+  const activeCallReviewRecordingUrl = getCallReviewPlaybackUri(activeCallReview?.callReview || null)
   const activeCallReviewHasRecording = activeCallReviewRecordingUrl.length > 0
   const activeCallReviewAnalysisStatus = activeCallReview?.callReview?.analysisStatus?.trim() || "available"
   const activeCallReviewEntries = activeCallReviewTranscriptText
@@ -6503,6 +6920,21 @@ export default function App() {
     activeCallReviewRecordingDuration > 0
       ? Math.min(1, activeCallReviewRecordingCurrentTime / activeCallReviewRecordingDuration)
       : 0
+  const syncStatusLabel = isSyncingRestaurantData
+    ? "Syncing latest changes..."
+    : isOfflineMode
+      ? restaurantDataLastSyncedAt
+        ? `Offline mode - showing cached data from ${formatSyncTimestamp(restaurantDataLastSyncedAt)}`
+        : "Offline mode - showing cached restaurant data."
+      : orderRealtimeStatus === "subscribed"
+        ? restaurantDataLastSyncedAt
+          ? `Live sync connected. Last synced ${formatSyncTimestamp(restaurantDataLastSyncedAt)}`
+          : "Live sync connected."
+        : orderRealtimeStatus === "connecting"
+          ? "Connecting live sync..."
+      : restaurantDataLastSyncedAt
+        ? `Last synced ${formatSyncTimestamp(restaurantDataLastSyncedAt)}`
+        : "Tap Sync to load the latest changes."
 
   function openAdminSettings() {
     setSettingsReturnTab(activeTab === "overview" ? "orders" : activeTab)
@@ -6528,11 +6960,13 @@ export default function App() {
   function renderPosOrdersEmptyState() {
     return (
       <View style={styles.posEmptyState}>
-        <Text style={styles.posEmptyStateEmoji}>{"\u{1F4CB}"}</Text>
+        <View style={styles.emptyStateIconCircle}>
+          <AppIcon name="clipboard" size={30} color={COLORS.ACCENT} />
+        </View>
         <Text style={styles.posEmptyStateTitle}>No orders yet</Text>
         <Text style={styles.posEmptyStateSubtitle}>Voice agent orders appear here automatically</Text>
         <Pressable style={styles.posEmptyStateButton} onPress={handleRefreshOrders} disabled={busy}>
-          <Text style={styles.posEmptyStateButtonText}>Check for orders</Text>
+          <ButtonLabel icon="refresh-cw" label="Check for orders" color={COLORS.SURFACE} textStyle={styles.posEmptyStateButtonText} />
         </Pressable>
       </View>
     )
@@ -6551,6 +6985,7 @@ export default function App() {
         ? `Auto print on - ${preferredPrinterLabel}`
         : "Auto print on - system print sheet"
       : "Use Day Summary for totals. Receipt preview stays on each order."
+    const syncButtonDisabled = busy || isSyncingRestaurantData || !selectedRestaurant
 
     return (
       <View style={[styles.posOrdersHeaderCard, isTabletLandscape ? styles.posOrdersHeaderCardLandscape : null]}>
@@ -6559,14 +6994,20 @@ export default function App() {
             <View style={styles.posOrdersHeadingTextWrap}>
               <Text style={styles.posOrdersTitle}>Orders</Text>
               <Text style={styles.posOrdersSubtitle}>{resolvedPrintStatusLabel}</Text>
+              <Text style={[styles.posOrdersSyncStatus, isOfflineMode ? styles.posOrdersSyncStatusOffline : null]}>{syncStatusLabel}</Text>
             </View>
           </View>
           <View style={styles.posOrdersHeaderActionRow}>
             <Pressable style={styles.posPrintCenterButton} onPress={() => setActiveTab("summary")} disabled={busy}>
-              <Text style={styles.posPrintCenterButtonText}>Day Summary</Text>
+              <ButtonLabel icon="bar-chart-2" label="Day Summary" color={COLORS.TEXT_PRIMARY} textStyle={styles.posPrintCenterButtonText} />
             </Pressable>
-            <Pressable style={styles.posHeaderRefreshButton} onPress={handleRefreshOrders} disabled={busy}>
-              <Text style={styles.posHeaderRefreshButtonText}>{"\u21BB"}</Text>
+            <Pressable style={styles.posHeaderSyncButton} onPress={() => { void handleSyncRestaurantData() }} disabled={syncButtonDisabled}>
+              <ButtonLabel
+                icon="refresh-cw"
+                label={isSyncingRestaurantData ? "Syncing..." : "Sync"}
+                color={COLORS.SURFACE}
+                textStyle={styles.posHeaderSyncButtonText}
+              />
             </Pressable>
           </View>
         </View>
@@ -6635,14 +7076,15 @@ export default function App() {
         onPress={() => handleQuickToggleOrderStatus(index)}
         disabled={busy}
       >
-        <Text
-          style={[
+        <ButtonLabel
+          icon={statusTone === "pending" ? "check" : "rotate-ccw"}
+          label={statusTone === "pending" ? "Complete" : "Pending"}
+          color={statusTone === "pending" ? COLORS.SURFACE : COLORS.ACCENT}
+          textStyle={[
             styles.posOrderActionButtonText,
             statusTone === "pending" ? styles.posOrderActionButtonTextOnDark : styles.posOrderActionButtonTextOutline,
           ]}
-        >
-          {statusTone === "pending" ? "\u2713 Complete" : "\u21BA Pending"}
-        </Text>
+        />
       </Pressable>
     )
     const callReviewAction = isVoiceOrder ? (
@@ -6650,7 +7092,12 @@ export default function App() {
         style={[styles.posOrderActionButton, styles.posOrderActionVoice]}
         onPress={() => openOrderCallReview(customerName, order.callReview)}
       >
-        <Text style={[styles.posOrderActionButtonText, styles.posOrderActionButtonTextVoice]}>Call Review</Text>
+        <ButtonLabel
+          icon="mic"
+          label="Call Review"
+          color={COLORS.VOICE_COLOR}
+          textStyle={[styles.posOrderActionButtonText, styles.posOrderActionButtonTextVoice]}
+        />
       </Pressable>
     ) : null
     const billPreviewAction = (
@@ -6659,12 +7106,17 @@ export default function App() {
         onPress={() => setPreviewOrder(order)}
         accessibilityLabel="Bill preview"
       >
-        <Text style={[styles.posOrderActionButtonText, styles.posOrderActionButtonTextOutline]}>Receipt Preview</Text>
+        <ButtonLabel
+          icon="eye"
+          label="Receipt Preview"
+          color={COLORS.ACCENT}
+          textStyle={[styles.posOrderActionButtonText, styles.posOrderActionButtonTextOutline]}
+        />
       </Pressable>
     )
     const detailsToggleAction = order.id ? (
       <Pressable style={styles.posOrderEditorToggle} onPress={() => openEditOrderModal(index)}>
-        <Text style={styles.posOrderEditorToggleText}>Edit Details</Text>
+        <ButtonLabel icon="edit-3" label="Edit Details" color={COLORS.ACCENT} textStyle={styles.posOrderEditorToggleText} />
       </Pressable>
     ) : null
 
@@ -6673,7 +7125,7 @@ export default function App() {
         key={`pos-order-card-${order.id || index}`}
         style={[
           styles.posOrderCard,
-          isTablet ? styles.posOrderCardTablet : null,
+          usePosGridLayout ? styles.posOrderCardTablet : null,
           isWideTabletLandscape ? styles.posOrderCardTabletWide : null,
         ]}
       >
@@ -6690,7 +7142,12 @@ export default function App() {
             <Text style={styles.posOrderCustomerNameText} numberOfLines={1}>
               {customerName}
             </Text>
-            {customerPhone ? <Text style={styles.posOrderCustomerPhone}>{"\u{1F4DE} "} {customerPhone}</Text> : null}
+            {customerPhone ? (
+              <View style={styles.inlineMetaRow}>
+                <AppIcon name="phone" size={14} color={COLORS.TEXT_SECONDARY} />
+                <Text style={styles.posOrderCustomerPhone}>{customerPhone}</Text>
+              </View>
+            ) : null}
           </View>
           <View style={styles.orderMetaBadgeRow}>
             {fulfillmentType === "delivery" ? (
@@ -6766,7 +7223,7 @@ export default function App() {
           <View
             style={[
               styles.posOrdersGrid,
-              isTablet ? styles.posOrdersGridTablet : null,
+              usePosGridLayout ? styles.posOrdersGridTablet : null,
               isTabletLandscape ? styles.posOrdersGridLandscape : null,
             ]}
           >
@@ -6793,7 +7250,7 @@ export default function App() {
             </View>
             <View style={styles.posOrdersHeaderActionRow}>
               <Pressable style={styles.posPrintCenterButton} onPress={() => setActiveTab("orders")}>
-                <Text style={styles.posPrintCenterButtonText}>Back To Orders</Text>
+                <ButtonLabel icon="arrow-left" label="Back To Orders" color={COLORS.TEXT_PRIMARY} textStyle={styles.posPrintCenterButtonText} />
               </Pressable>
             </View>
           </View>
@@ -6891,10 +7348,10 @@ export default function App() {
         </Text>
         <View style={styles.posTopHeaderActions}>
           <Pressable style={styles.posSettingsButton} onPress={openAdminSettings} accessibilityLabel="Open settings">
-            <Text style={styles.posSettingsButtonText}>{"\u2699\uFE0F"}</Text>
+            <AppIcon name="settings" size={18} color={COLORS.HEADER_TEXT} />
           </Pressable>
           <Pressable style={styles.posLogoutButton} onPress={handleLogout} accessibilityRole="button">
-            <Text style={styles.posLogoutText}>Logout</Text>
+            <ButtonLabel icon="log-out" label="Logout" color={COLORS.HEADER_TEXT} size={15} textStyle={styles.posLogoutText} />
           </Pressable>
         </View>
       </View>
@@ -7311,6 +7768,7 @@ export default function App() {
     }
 
     const isSettingsHeader = Boolean(settingsReturnTab)
+    const syncButtonDisabled = busy || isSyncingRestaurantData || !selectedRestaurant
 
     return (
       <View style={styles.settingsHeader}>
@@ -7318,20 +7776,26 @@ export default function App() {
           style={styles.settingsBackButton}
           onPress={handleAdminHeaderBack}
         >
-          <View style={styles.settingsBackIconWrap}>
-            <View style={[styles.settingsBackIconStroke, styles.settingsBackIconStrokeUpper]} />
-            <View style={[styles.settingsBackIconStroke, styles.settingsBackIconStrokeLower]} />
-          </View>
+          <AppIcon name="arrow-left" size={18} color={COLORS.HEADER_TEXT} />
           <Text style={styles.settingsBackText}>Back</Text>
         </Pressable>
         <Text style={styles.settingsHeaderTitle}>{isSettingsHeader ? "Settings" : "Operations Console"}</Text>
         <View style={styles.settingsHeaderActions}>
-          {isSettingsHeader ? <Text style={styles.settingsHeaderGear}>{"\u2699\uFE0F"}</Text> : null}
+          {isSettingsHeader ? <AppIcon name="settings" size={16} color={COLORS.HEADER_TEXT} /> : null}
+          <Pressable style={styles.settingsHeaderSyncButton} onPress={() => { void handleSyncRestaurantData() }} disabled={syncButtonDisabled}>
+            <ButtonLabel
+              icon="refresh-cw"
+              label={isSyncingRestaurantData ? "Syncing..." : "Sync"}
+              color={COLORS.HEADER_TEXT}
+              size={14}
+              textStyle={styles.settingsHeaderSyncButtonText}
+            />
+          </Pressable>
           <Pressable style={styles.settingsHeaderPrinterButton} onPress={() => setIsPrintCenterVisible(true)}>
-            <Text style={styles.settingsHeaderPrinterButtonText}>Printer</Text>
+            <ButtonLabel icon="printer" label="Printer" color={COLORS.HEADER_TEXT} size={14} textStyle={styles.settingsHeaderPrinterButtonText} />
           </Pressable>
           <Pressable style={isSettingsHeader ? styles.settingsHeaderLogoutPlain : styles.settingsHeaderLogoutPill} onPress={handleLogout}>
-            <Text style={styles.settingsHeaderLogoutText}>Logout</Text>
+            <ButtonLabel icon="log-out" label="Logout" color={COLORS.HEADER_TEXT} size={14} textStyle={styles.settingsHeaderLogoutText} />
           </Pressable>
         </View>
       </View>
@@ -7341,7 +7805,9 @@ export default function App() {
   function renderOrdersEmptyState() {
     return (
       <View style={styles.ordersEmptyState}>
-        <Text style={styles.ordersEmptyEmoji}>{"\u{1F4CB}"}</Text>
+        <View style={styles.emptyStateIconCircle}>
+          <AppIcon name="clipboard" size={28} color={COLORS.ACCENT} />
+        </View>
         <Text style={styles.ordersEmptyTitle}>No orders yet</Text>
         <Text style={styles.ordersEmptySubtitle}>Orders from your voice agent will appear here</Text>
       </View>
@@ -7357,7 +7823,12 @@ export default function App() {
         </View>
         <View style={[styles.ordersHeaderActions, isCompactViewport ? styles.ordersHeaderActionsCompact : null]}>
           <Pressable style={styles.printAllButton} onPress={handlePrintAllPending} disabled={busy}>
-            <Text style={styles.printAllButtonText}>{isCompactViewport ? "Print" : "Print All"}</Text>
+            <ButtonLabel
+              icon="printer"
+              label={isCompactViewport ? "Print" : "Print All"}
+              color={COLORS.SURFACE}
+              textStyle={styles.printAllButtonText}
+            />
           </Pressable>
           <Pressable
             style={[styles.ordersRefreshButton, isCompactViewport ? styles.ordersRefreshButtonCompact : null]}
@@ -7366,7 +7837,7 @@ export default function App() {
             accessibilityRole="button"
             accessibilityLabel="Refresh orders"
           >
-            <Text style={styles.ordersRefreshIcon}>{"\u21BB"}</Text>
+            <AppIcon name="refresh-cw" size={18} color={THEME.text} />
           </Pressable>
         </View>
       </View>
@@ -7642,7 +8113,7 @@ export default function App() {
           <Text style={[styles.orderCustomerName, useStackedOrderFields ? styles.orderCustomerNameCompact : null]}>
             {customerName}
           </Text>
-          {customerPhone ? <Text style={styles.orderCustomerPhone}> {"\u00B7"} {customerPhone}</Text> : null}
+          {customerPhone ? <Text style={styles.orderCustomerPhone}>  {customerPhone}</Text> : null}
         </Text>
         <View style={styles.orderMetaBadgeRow}>
           {fulfillmentType === "delivery" ? (
@@ -7692,16 +8163,19 @@ export default function App() {
               onPress={() => handleQuickToggleOrderStatus(index)}
               disabled={busy}
             >
-              <Text style={styles.orderCardPrimaryActionText}>
-                {statusTone === "pending" ? "Mark Complete" : "Mark Pending"}
-              </Text>
+              <ButtonLabel
+                icon={statusTone === "pending" ? "check" : "rotate-ccw"}
+                label={statusTone === "pending" ? "Mark Complete" : "Mark Pending"}
+                color={COLORS.SURFACE}
+                textStyle={styles.orderCardPrimaryActionText}
+              />
             </Pressable>
             {hasDraftCallReview ? (
               <Pressable
                 style={[styles.orderCardActionButton, styles.orderCardSecondaryAction]}
                 onPress={() => openOrderCallReview(customerName, order.callReview)}
               >
-                <Text style={styles.orderCardSecondaryActionText}>Review Call</Text>
+                <ButtonLabel icon="mic" label="Review Call" color={THEME.accent} textStyle={styles.orderCardSecondaryActionText} />
               </Pressable>
             ) : null}
           </View>
@@ -7711,10 +8185,10 @@ export default function App() {
               onPress={() => setPreviewOrder(order)}
               accessibilityLabel="Preview receipt"
             >
-              <Text style={styles.orderPreviewButtonText}>{"\u{1F441}\uFE0F"}</Text>
+              <AppIcon name="eye" size={18} color={COLORS.TEXT_SECONDARY} />
             </Pressable>
             <Pressable style={[styles.orderCardActionButton, styles.orderDetailsToggle]} onPress={() => openEditOrderModal(index)}>
-              <Text style={styles.orderDetailsToggleText}>Edit Details</Text>
+              <ButtonLabel icon="edit-3" label="Edit Details" color={THEME.accent} textStyle={styles.orderDetailsToggleText} />
             </Pressable>
           </View>
         </View>
@@ -7760,7 +8234,7 @@ export default function App() {
               {authCompletionState ? (
                 <View style={styles.authCompletionCard}>
                   <View style={styles.authCompletionIconCircle}>
-                    <Text style={styles.authCompletionIcon}>✓</Text>
+                    <AppIcon name="check" size={28} color={COLORS.ACCENT} />
                   </View>
                   <Text style={styles.authCompletionTitle}>{authCompletionState.title}</Text>
                   <Text style={styles.authCompletionMessage}>{authCompletionState.message}</Text>
@@ -7806,7 +8280,7 @@ export default function App() {
         <StatusBar barStyle="light-content" backgroundColor={COLORS.HEADER_BG} translucent={false} />
         <KeyboardAvoidingView style={styles.keyboardAvoidingFill} behavior={keyboardAvoidingBehavior}>
           <View style={styles.posShell}>
-            {isTablet ? renderPosSidebar() : null}
+            {showPosSidebar ? renderPosSidebar() : null}
             <View style={styles.posMainArea}>
               {renderPosHeader()}
               <ScrollView
@@ -7852,7 +8326,7 @@ export default function App() {
             isPlaying={callReviewPlayerStatus.playing}
             recordingDuration={activeCallReviewRecordingDuration}
             recordingProgress={activeCallReviewRecordingProgress}
-            onToggleRecording={() => handleOpenCallRecording(activeCallReviewRecordingUrl)}
+            onToggleRecording={() => handleOpenCallRecording()}
             onClose={closeOrderCallReview}
             formatAudioTime={formatAudioTime}
           />
@@ -7978,8 +8452,40 @@ export default function App() {
                   onChangeText={setRestaurantAddress}
                 />
               </View>
+              <Text style={styles.scannerDescription}>
+                {selectedRestaurant?.hasPaymentPin
+                  ? "Payment PIN is configured for this restaurant. Save a new 4 to 8 digit PIN below to rotate it."
+                  : "Set a restaurant-specific 4 to 8 digit payment PIN for POS settlement approvals."}
+              </Text>
+              <View style={styles.scannerFieldShell}>
+                <Text style={styles.scannerFieldLabel}>Payment PIN</Text>
+                <TextInput
+                  style={styles.scannerFieldInput}
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  value={restaurantPaymentPin}
+                  onChangeText={(value) => setRestaurantPaymentPin(value.replace(/[^\d]/g, ""))}
+                  keyboardType="number-pad"
+                  secureTextEntry
+                  maxLength={8}
+                />
+              </View>
+              <View style={styles.scannerFieldShell}>
+                <Text style={styles.scannerFieldLabel}>Confirm Payment PIN</Text>
+                <TextInput
+                  style={styles.scannerFieldInput}
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  value={restaurantPaymentPinConfirm}
+                  onChangeText={(value) => setRestaurantPaymentPinConfirm(value.replace(/[^\d]/g, ""))}
+                  keyboardType="number-pad"
+                  secureTextEntry
+                  maxLength={8}
+                />
+              </View>
               <Pressable style={styles.scannerPrimaryButton} onPress={handleSaveRestaurant} disabled={busy}>
                 <Text style={styles.scannerPrimaryButtonText}>{busy ? "Updating..." : "Update"}</Text>
+              </Pressable>
+              <Pressable style={styles.scannerPrimaryButton} onPress={handleSaveRestaurantPaymentPin} disabled={busy}>
+                <Text style={styles.scannerPrimaryButtonText}>{busy ? "Saving..." : "Save Payment PIN"}</Text>
               </Pressable>
             </View>
           </View>
@@ -8015,11 +8521,11 @@ export default function App() {
 
               <View style={styles.scannerCaptureRow}>
                 <Pressable style={styles.scannerCaptureButton} onPress={() => pickImage(true)}>
-                  <Text style={styles.scannerCaptureButtonIcon}>{"\u{1F4F7}"}</Text>
+                  <AppIcon name="camera" size={18} color={COLORS.TEXT_PRIMARY} />
                   <Text style={styles.scannerCaptureButtonText}>Capture</Text>
                 </Pressable>
                 <Pressable style={styles.scannerCaptureButton} onPress={() => pickImage(false)}>
-                  <Text style={styles.scannerCaptureButtonIcon}>{"\u{1F5BC}\uFE0F"}</Text>
+                  <AppIcon name="image" size={18} color={COLORS.TEXT_PRIMARY} />
                   <Text style={styles.scannerCaptureButtonText}>Gallery</Text>
                 </Pressable>
               </View>
@@ -8245,7 +8751,7 @@ export default function App() {
         isPlaying={callReviewPlayerStatus.playing}
         recordingDuration={activeCallReviewRecordingDuration}
         recordingProgress={activeCallReviewRecordingProgress}
-        onToggleRecording={() => handleOpenCallRecording(activeCallReviewRecordingUrl)}
+        onToggleRecording={() => handleOpenCallRecording()}
         onClose={closeOrderCallReview}
         formatAudioTime={formatAudioTime}
       />
@@ -8300,33 +8806,35 @@ const styles = StyleSheet.create({
   },
   authCard: {
     width: "100%",
-    maxWidth: 520,
+    maxWidth: 560,
     alignSelf: "center",
     backgroundColor: "transparent",
     borderRadius: 0,
-    paddingVertical: 8,
+    paddingVertical: 14,
   },
   authCardLandscape: {
-    maxWidth: 720,
-    paddingVertical: 16,
+    maxWidth: 760,
+    paddingVertical: 20,
   },
   authCompletionCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 18,
+    borderRadius: 28,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    paddingHorizontal: 24,
-    paddingVertical: 28,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    paddingHorizontal: 28,
+    paddingVertical: 32,
     alignItems: "center",
-    gap: 14,
+    gap: 16,
     ...CARD_SHADOW,
     elevation: 2,
   },
   authCompletionIconCircle: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 72,
+    height: 72,
+    borderRadius: 24,
     backgroundColor: COLORS.ACCENT_LIGHT,
+    borderWidth: 1,
+    borderColor: COLORS.ACCENT,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -8362,21 +8870,24 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
   authBrandingContainer: {
-    marginBottom: 40,
+    marginBottom: 44,
     alignItems: "center",
+    gap: 6,
   },
   authBrandingLabel: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "800",
     color: COLORS.ACCENT,
-    letterSpacing: 2,
+    letterSpacing: 2.4,
     fontFamily: FONT_SANS,
   },
   card: {
     backgroundColor: THEME.card,
-    borderRadius: 16,
-    padding: 14,
-    gap: 10,
+    borderRadius: RADIUS.XL,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    padding: SPACING.LG,
+    gap: SPACING.SM,
     ...CARD_SHADOW,
     elevation: 3,
   },
@@ -8387,9 +8898,30 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
     fontFamily: FONT_SANS,
   },
-  title: { color: THEME.text, fontSize: 24, fontWeight: "700", fontFamily: FONT_SANS },
-  section: { color: THEME.text, fontSize: 18, fontWeight: "700", fontFamily: FONT_SANS },
-  subtitle: { color: THEME.mutedText, fontSize: 13, lineHeight: 18, fontFamily: FONT_SANS },
+  buttonLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: SPACING.XS,
+  },
+  inlineMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.XS,
+  },
+  emptyStateIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: RADIUS.LG,
+    backgroundColor: COLORS.ACCENT_LIGHT,
+    borderWidth: 1,
+    borderColor: COLORS.ACCENT,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  title: { color: THEME.text, fontSize: TYPOGRAPHY.DISPLAY, fontWeight: "800", fontFamily: FONT_SANS },
+  section: { color: THEME.text, fontSize: TYPOGRAPHY.TITLE, fontWeight: "800", fontFamily: FONT_SANS },
+  subtitle: { color: THEME.mutedText, fontSize: TYPOGRAPHY.BODY, lineHeight: 22, fontFamily: FONT_SANS },
   posSafe: { flex: 1, width: "100%", backgroundColor: COLORS.BACKGROUND },
   posShell: { flex: 1, flexDirection: "row", backgroundColor: COLORS.BACKGROUND },
   posSidebar: {
@@ -8428,31 +8960,36 @@ const styles = StyleSheet.create({
   posMainArea: { flex: 1, backgroundColor: COLORS.BACKGROUND },
   posTopHeader: {
     backgroundColor: COLORS.HEADER_BG,
-    paddingTop: Platform.OS === "android" ? SAFE_AREA.top + 8 : 8,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
+    paddingTop: Platform.OS === "android" ? SAFE_AREA.top + SPACING.SM : SPACING.SM,
+    paddingHorizontal: SPACING.LG,
+    paddingBottom: SPACING.SM,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
+    gap: SPACING.SM,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
   },
   posTopHeaderTitle: {
     flex: 1,
     color: COLORS.HEADER_TEXT,
-    fontSize: 18,
-    fontWeight: "700",
-    lineHeight: 22,
+    fontSize: TYPOGRAPHY.TITLE,
+    fontWeight: "800",
+    lineHeight: 26,
     fontFamily: FONT_SANS,
   },
-  posTopHeaderActions: { flexDirection: "row", alignItems: "center", gap: 14 },
+  posTopHeaderActions: { flexDirection: "row", alignItems: "center", gap: SPACING.SM },
   posSettingsButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.MD,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
-  posSettingsButtonText: { color: COLORS.HEADER_TEXT, fontSize: 22, fontFamily: FONT_SANS },
+  posSettingsButtonText: { color: COLORS.HEADER_TEXT, fontSize: 20, fontFamily: FONT_SANS },
   posLogoutButton: {
     paddingHorizontal: 2,
     paddingVertical: 4,
@@ -8465,26 +9002,31 @@ const styles = StyleSheet.create({
   },
   posScroll: { flex: 1, backgroundColor: COLORS.BACKGROUND },
   posScrollContent: {
-    paddingHorizontal: 12,
-    paddingTop: 12,
-    paddingBottom: (Platform.OS === "ios" ? 32 : 16) + SAFE_AREA.bottom,
-    gap: 10,
+    paddingHorizontal: SPACING.SM,
+    paddingTop: SPACING.SM,
+    paddingBottom: (Platform.OS === "ios" ? SPACING.XXL : SPACING.MD) + SAFE_AREA.bottom,
+    gap: SPACING.SM,
     backgroundColor: COLORS.BACKGROUND,
   },
   posScrollContentPhone: { paddingBottom: (Platform.OS === "ios" ? 132 : 120) + SAFE_AREA.bottom },
   posTabSection: { width: "100%", gap: 0 },
-  posTabSectionLandscape: { maxWidth: 1320, alignSelf: "center" },
+  posTabSectionLandscape: { width: "100%", alignSelf: "stretch" },
   posOrdersHeaderCard: {
     width: "100%",
     alignSelf: "stretch",
-    paddingHorizontal: 0,
-    paddingTop: 6,
-    paddingBottom: 10,
-    backgroundColor: "transparent",
+    paddingHorizontal: SPACING.MD,
+    paddingTop: SPACING.MD,
+    paddingBottom: SPACING.MD,
+    backgroundColor: COLORS.SURFACE,
+    borderRadius: RADIUS.XL,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    ...METRIC_CARD_SHADOW,
   },
   posOrdersHeaderCardLandscape: {
-    maxWidth: 1320,
-    paddingTop: 10,
+    width: "100%",
+    alignSelf: "stretch",
+    paddingTop: 18,
     paddingBottom: 16,
   },
   posOrdersHeaderTopRow: {
@@ -8492,47 +9034,57 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     flexWrap: "wrap",
-    gap: 14,
+    gap: SPACING.SM,
   },
-  posOrdersHeadingRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  posOrdersHeadingTextWrap: { gap: 2 },
+  posOrdersHeadingRow: { flexDirection: "row", alignItems: "center", gap: SPACING.XS },
+  posOrdersHeadingTextWrap: { gap: SPACING.XXS },
   posOrdersTitle: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 22,
+    fontSize: TYPOGRAPHY.DISPLAY - 2,
     fontWeight: "800",
     fontFamily: FONT_SANS,
   },
   posOrdersSubtitle: {
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: TYPOGRAPHY.BODY - 1,
+    lineHeight: 20,
     fontFamily: FONT_SANS,
   },
-  posOrdersHeaderActionRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  posOrdersSyncStatus: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 11,
+    lineHeight: 16,
+    fontFamily: FONT_SANS,
+  },
+  posOrdersSyncStatusOffline: {
+    color: COLORS.WARNING,
+  },
+  posOrdersHeaderActionRow: { flexDirection: "row", alignItems: "center", gap: SPACING.XS },
   posPrintCenterButton: {
-    minHeight: 38,
-    borderRadius: 19,
-    backgroundColor: COLORS.SURFACE,
+    minHeight: 44,
+    borderRadius: RADIUS.MD,
+    backgroundColor: COLORS.SURFACE_RAISED,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    paddingHorizontal: 14,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    paddingHorizontal: SPACING.MD,
     alignItems: "center",
     justifyContent: "center",
   },
   posPrintCenterButtonText: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 13,
+    fontSize: TYPOGRAPHY.BODY - 1,
     fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   posSummaryCard: {
-    borderRadius: 18,
+    borderRadius: RADIUS.LG,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     backgroundColor: COLORS.SURFACE,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    gap: 10,
+    paddingHorizontal: SPACING.LG,
+    paddingVertical: SPACING.MD,
+    gap: SPACING.SM,
+    ...SOFT_CARD_SHADOW,
   },
   posSummaryRow: {
     flexDirection: "row",
@@ -8567,12 +9119,12 @@ const styles = StyleSheet.create({
     color: COLORS.ACCENT,
   },
   posHeaderRefreshButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: COLORS.SURFACE,
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: COLORS.SURFACE_RAISED,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -8580,6 +9132,20 @@ const styles = StyleSheet.create({
     color: COLORS.ACCENT,
     fontSize: 18,
     fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
+  posHeaderSyncButton: {
+    minHeight: 42,
+    borderRadius: 14,
+    backgroundColor: COLORS.ACCENT,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  posHeaderSyncButtonText: {
+    color: COLORS.SURFACE,
+    fontSize: 13,
+    fontWeight: "800",
     fontFamily: FONT_SANS,
   },
   posStatRow: {
@@ -8612,25 +9178,26 @@ const styles = StyleSheet.create({
     alignSelf: "stretch",
     marginHorizontal: 0,
     marginTop: 0,
-    marginBottom: 12,
-    padding: 4,
+    marginBottom: SPACING.SM,
+    padding: SPACING.XXS,
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
+    borderRadius: RADIUS.LG,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   posFilterBarLandscape: {
-    maxWidth: 1320,
+    width: "100%",
+    alignSelf: "stretch",
     marginBottom: 16,
   },
   posFilterTab: {
     flex: 1,
-    height: 46,
+    height: 48,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 10,
+    borderRadius: RADIUS.MD,
   },
-  posFilterTabActive: { backgroundColor: COLORS.ACCENT_LIGHT },
+  posFilterTabActive: { backgroundColor: COLORS.ACCENT_LIGHT, borderWidth: 1, borderColor: COLORS.ACCENT },
   posFilterTabText: {
     fontSize: 14,
     fontFamily: FONT_SANS,
@@ -8638,26 +9205,33 @@ const styles = StyleSheet.create({
   posFilterTabLabelActive: { color: COLORS.ACCENT, fontWeight: "700" },
   posFilterTabLabelInactive: { color: COLORS.TEXT_MUTED, fontWeight: "400" },
   posFilterTabCount: { color: COLORS.TEXT_MUTED, fontWeight: "400" },
-  posOrdersGrid: { width: "100%", gap: 10 },
+  posOrdersGrid: { width: "100%", gap: SPACING.SM },
   posOrdersGridTablet: { flexDirection: "row", flexWrap: "wrap", alignItems: "stretch", justifyContent: "flex-start" },
   posOrdersGridLandscape: { gap: 12 },
   posOrderCard: {
     width: "100%",
     flexDirection: "row",
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 12,
+    borderRadius: RADIUS.LG,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     padding: 0,
     overflow: "hidden",
+    ...SOFT_CARD_SHADOW,
   },
   posOrderCardTablet: { width: "48.8%" },
   posOrderCardTabletWide: { width: "32.5%" },
-  posOrderAccentBar: { width: 4, alignSelf: "stretch" },
+  posOrderAccentBar: { width: 6, alignSelf: "stretch" },
   posOrderAccentPending: { backgroundColor: COLORS.ACCENT },
   posOrderAccentSuccess: { backgroundColor: COLORS.SUCCESS },
-  posOrderCardBody: { flex: 1, paddingHorizontal: 14, paddingTop: 14, paddingBottom: 14 },
-  posOrderTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 },
+  posOrderCardBody: { flex: 1, paddingHorizontal: SPACING.MD, paddingTop: SPACING.MD, paddingBottom: SPACING.MD },
+  posOrderTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: SPACING.XS,
+    marginBottom: SPACING.XS,
+  },
   posOrderCode: {
     color: COLORS.TEXT_PRIMARY,
     fontSize: 18,
@@ -8665,12 +9239,13 @@ const styles = StyleSheet.create({
     fontFamily: FONT_SANS,
   },
   posOrderStatusPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS - 2,
+    borderRadius: RADIUS.PILL,
+    borderWidth: 1,
   },
-  posOrderStatusPillPending: { backgroundColor: COLORS.WARNING_BG },
-  posOrderStatusPillSuccess: { backgroundColor: COLORS.SUCCESS_BG },
+  posOrderStatusPillPending: { backgroundColor: COLORS.WARNING_BG, borderColor: COLORS.WARNING },
+  posOrderStatusPillSuccess: { backgroundColor: COLORS.SUCCESS_BG, borderColor: COLORS.SUCCESS },
   posOrderStatusPillText: {
     fontSize: 11,
     fontWeight: "700",
@@ -8684,8 +9259,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
-    marginBottom: 10,
+    gap: SPACING.XS,
+    marginBottom: SPACING.XS,
   },
   posOrderCustomerNameText: {
     flex: 1,
@@ -8750,7 +9325,7 @@ const styles = StyleSheet.create({
   },
   paymentModalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(4, 11, 21, 0.45)",
+    backgroundColor: COLORS.MODAL_OVERLAY,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 18,
@@ -8761,15 +9336,22 @@ const styles = StyleSheet.create({
   paymentModalCard: {
     width: "100%",
     maxWidth: 420,
-    borderRadius: 18,
+    borderRadius: 26,
     backgroundColor: COLORS.SURFACE,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
-    gap: 10,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+    gap: 12,
     ...CARD_SHADOW,
     elevation: 8,
+  },
+  paymentModalScroll: {
+    width: "100%",
+  },
+  paymentModalScrollContent: {
+    gap: 12,
+    paddingBottom: 4,
   },
   printCenterCard: {
     maxWidth: 520,
@@ -8783,14 +9365,14 @@ const styles = StyleSheet.create({
   },
   paymentModalTitle: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: "800",
     fontFamily: FONT_SANS,
   },
   paymentModalSubtitle: {
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 14,
+    lineHeight: 20,
     fontFamily: FONT_SANS,
   },
   paymentModalCurrentBadgeRow: {
@@ -8803,17 +9385,17 @@ const styles = StyleSheet.create({
   paymentModalFieldLabel: {
     color: COLORS.TEXT_SECONDARY,
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "800",
     textTransform: "uppercase",
-    letterSpacing: 0.5,
+    letterSpacing: 0.8,
     marginTop: 4,
     fontFamily: FONT_SANS,
   },
   paymentModalInput: {
-    minHeight: 48,
-    borderRadius: 12,
+    minHeight: 50,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     backgroundColor: COLORS.SURFACE_RAISED,
     paddingHorizontal: 14,
     paddingVertical: 12,
@@ -8844,9 +9426,9 @@ const styles = StyleSheet.create({
     fontFamily: FONT_SANS,
   },
   printerDropdownMenu: {
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     backgroundColor: COLORS.SURFACE,
     overflow: "hidden",
   },
@@ -8856,7 +9438,7 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     justifyContent: "center",
     borderTopWidth: 1,
-    borderTopColor: COLORS.BORDER,
+    borderTopColor: COLORS.SURFACE_BORDER_SOFT,
   },
   printerDropdownItemActive: {
     backgroundColor: COLORS.ACCENT_LIGHT,
@@ -8876,10 +9458,10 @@ const styles = StyleSheet.create({
   },
   paymentMethodButton: {
     flex: 1,
-    minHeight: 46,
-    borderRadius: 12,
+    minHeight: 48,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     backgroundColor: COLORS.SURFACE_RAISED,
     alignItems: "center",
     justifyContent: "center",
@@ -9296,67 +9878,69 @@ const styles = StyleSheet.create({
   },
   posEmptyState: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 12,
-    paddingHorizontal: 20,
-    paddingVertical: 28,
+    borderRadius: RADIUS.LG,
+    paddingHorizontal: SPACING.LG,
+    paddingVertical: SPACING.XL,
     alignItems: "center",
     justifyContent: "center",
+    gap: SPACING.SM,
     ...METRIC_CARD_SHADOW,
     elevation: 3,
   },
   posEmptyStateEmoji: { fontSize: 48, textAlign: "center" },
   posEmptyStateTitle: {
-    marginTop: 12,
+    marginTop: SPACING.SM,
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 18,
+    fontSize: TYPOGRAPHY.TITLE,
     fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   posEmptyStateSubtitle: {
-    marginTop: 6,
+    marginTop: SPACING.XXS + 2,
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 14,
+    fontSize: TYPOGRAPHY.BODY,
     textAlign: "center",
+    lineHeight: 22,
     fontFamily: FONT_SANS,
   },
   posEmptyStateButton: {
-    marginTop: 20,
+    marginTop: SPACING.LG,
     minHeight: 44,
-    borderRadius: 8,
+    borderRadius: RADIUS.MD,
     backgroundColor: COLORS.ACCENT,
-    paddingHorizontal: 16,
+    paddingHorizontal: SPACING.MD,
     alignItems: "center",
     justifyContent: "center",
   },
   posEmptyStateButtonText: {
     color: COLORS.SURFACE,
-    fontSize: 13,
-    fontWeight: "600",
+    fontSize: TYPOGRAPHY.BODY - 1,
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   posPanelCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 12,
-    padding: 14,
-    gap: 10,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.MD,
+    gap: SPACING.SM,
     ...METRIC_CARD_SHADOW,
     elevation: 3,
   },
   posPanelTitle: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 18,
+    fontSize: TYPOGRAPHY.TITLE,
     fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   posPanelBody: {
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 15,
+    fontSize: TYPOGRAPHY.BODY,
     lineHeight: 22,
     fontFamily: FONT_SANS,
   },
   posPanelCaption: {
     color: COLORS.TEXT_MUTED,
-    fontSize: 11,
+    fontSize: TYPOGRAPHY.CAPTION,
     lineHeight: 16,
     fontFamily: FONT_SANS,
   },
@@ -9422,29 +10006,29 @@ const styles = StyleSheet.create({
     fontFamily: FONT_SANS,
   },
   posBottomTabLabelActive: { color: COLORS.ACCENT },
-  ordersTabSection: { width: "100%", gap: 12 },
+  ordersTabSection: { width: "100%", gap: SPACING.SM },
   ordersContentWrap: { width: "100%", maxWidth: 480, alignSelf: "center" },
   ordersHeader: {
     width: "100%",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
+    gap: SPACING.XS,
   },
-  ordersHeaderText: { flex: 1, gap: 2 },
+  ordersHeaderText: { flex: 1, gap: SPACING.XXS },
   ordersHeaderActions: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
   ordersHeaderActionsCompact: { gap: 6 },
-  ordersHeaderTitle: { color: THEME.text, fontSize: 28, fontWeight: "800", fontFamily: FONT_SANS },
-  ordersHeaderTitleCompact: { fontSize: 22 },
-  ordersHeaderSubtitle: { color: THEME.mutedText, fontSize: 13, fontWeight: "600", fontFamily: FONT_SANS },
+  ordersHeaderTitle: { color: THEME.text, fontSize: TYPOGRAPHY.DISPLAY, fontWeight: "800", fontFamily: FONT_SANS },
+  ordersHeaderTitleCompact: { fontSize: TYPOGRAPHY.TITLE + 2 },
+  ordersHeaderSubtitle: { color: THEME.mutedText, fontSize: TYPOGRAPHY.BODY - 1, fontWeight: "600", fontFamily: FONT_SANS },
   printAllButton: {
     backgroundColor: "transparent",
     borderWidth: 1,
     borderColor: COLORS.ACCENT,
-    borderRadius: 10,
+    borderRadius: RADIUS.SM,
     paddingVertical: 0,
-    paddingHorizontal: 12,
-    minHeight: 40,
+    paddingHorizontal: SPACING.SM,
+    minHeight: 42,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -9461,11 +10045,11 @@ const styles = StyleSheet.create({
   },
   ordersRefreshButtonCompact: { width: 42, height: 42, borderRadius: 21 },
   ordersRefreshIcon: { color: THEME.text, fontSize: 20, fontWeight: "700", fontFamily: FONT_SANS },
-  ordersFilterRow: { gap: 8, paddingVertical: 2, paddingRight: 4 },
+  ordersFilterRow: { gap: SPACING.XS, paddingVertical: SPACING.XXS, paddingRight: SPACING.XXS },
   ordersFilterPill: {
     minHeight: 42,
-    paddingHorizontal: 15,
-    borderRadius: 999,
+    paddingHorizontal: SPACING.MD,
+    borderRadius: RADIUS.PILL,
     borderWidth: 1,
     borderColor: THEME.border,
     backgroundColor: "transparent",
@@ -9480,22 +10064,22 @@ const styles = StyleSheet.create({
   ordersFilterPillText: { color: THEME.text, fontSize: 14, fontWeight: "700", fontFamily: FONT_SANS },
   ordersFilterPillTextCompact: { fontSize: 13 },
   ordersFilterPillTextActive: { color: THEME.activeTextDark },
-  ordersList: { width: "100%", gap: 10, alignItems: "center" },
+  ordersList: { width: "100%", gap: SPACING.SM, alignItems: "center" },
   ordersAddButton: { width: "100%", minHeight: 44, justifyContent: "center" },
   ordersEmptyState: {
     width: "100%",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 40,
-    paddingHorizontal: 24,
-    gap: 8,
+    paddingVertical: SPACING.XL + SPACING.MD,
+    paddingHorizontal: SPACING.XL,
+    gap: SPACING.XS,
   },
   ordersEmptyEmoji: { fontSize: 34 },
-  ordersEmptyTitle: { color: THEME.text, fontSize: 24, fontWeight: "700", fontFamily: FONT_SANS },
+  ordersEmptyTitle: { color: THEME.text, fontSize: TYPOGRAPHY.DISPLAY - 2, fontWeight: "700", fontFamily: FONT_SANS },
   ordersEmptySubtitle: {
     color: THEME.mutedText,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: TYPOGRAPHY.BODY,
+    lineHeight: 22,
     textAlign: "center",
     fontFamily: FONT_SANS,
   },
@@ -9504,12 +10088,12 @@ const styles = StyleSheet.create({
     maxWidth: 480,
     alignSelf: "center",
     backgroundColor: THEME.card,
-    borderRadius: 16,
+    borderRadius: RADIUS.LG,
     borderWidth: 1,
-    borderLeftWidth: 4,
-    borderColor: THEME.border,
-    padding: 14,
-    gap: 10,
+    borderLeftWidth: 6,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    padding: SPACING.MD,
+    gap: SPACING.SM,
     ...CARD_SHADOW,
     elevation: 2,
   },
@@ -9525,13 +10109,14 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 1,
   },
-  orderStatusPillPending: { backgroundColor: ORDER_STATUS_PENDING },
-  orderStatusPillComplete: { backgroundColor: ORDER_STATUS_COMPLETE },
-  orderStatusPillCancelled: { backgroundColor: ORDER_STATUS_CANCELLED },
+  orderStatusPillPending: { backgroundColor: COLORS.WARNING_BG, borderColor: ORDER_STATUS_PENDING },
+  orderStatusPillComplete: { backgroundColor: COLORS.SUCCESS_BG, borderColor: ORDER_STATUS_COMPLETE },
+  orderStatusPillCancelled: { backgroundColor: COLORS.DANGER_BG, borderColor: ORDER_STATUS_CANCELLED },
   orderStatusPillText: { fontSize: 12, fontWeight: "800", letterSpacing: 0.4, fontFamily: FONT_SANS },
   orderStatusPillTextDark: { color: COLORS.TEXT_PRIMARY },
-  orderStatusPillTextLight: { color: COLORS.SURFACE },
+  orderStatusPillTextLight: { color: COLORS.TEXT_PRIMARY },
   orderCustomerLine: { color: THEME.text, fontSize: 16, fontFamily: FONT_SANS, lineHeight: 22 },
   orderCustomerLineCompact: { fontSize: 15, lineHeight: 20 },
   orderCustomerName: { color: THEME.text, fontSize: 16, fontWeight: "700", fontFamily: FONT_SANS },
@@ -9558,11 +10143,11 @@ const styles = StyleSheet.create({
   orderCardActionRowSecondary: { marginTop: 2 },
   orderCardActionButton: {
     flex: 1,
-    minHeight: 44,
-    borderRadius: 12,
+    minHeight: 46,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
   },
   orderCardActionButtonFull: { flexBasis: "100%" },
   orderCardPrimaryAction: { backgroundColor: THEME.primary, borderWidth: 1, borderColor: THEME.primary },
@@ -9575,14 +10160,14 @@ const styles = StyleSheet.create({
   orderCardSecondaryActionText: { color: THEME.accent, fontSize: 14, fontWeight: "700", fontFamily: FONT_SANS },
   printButton: {
     backgroundColor: COLORS.SURFACE_RAISED,
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 0,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     minHeight: 42,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   printButtonText: { color: COLORS.TEXT_SECONDARY, fontSize: 13, fontWeight: "700", fontFamily: FONT_SANS },
   orderPreviewButton: {
@@ -9591,8 +10176,8 @@ const styles = StyleSheet.create({
     flexBasis: 44,
     backgroundColor: COLORS.SURFACE_RAISED,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    borderRadius: 10,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: 14,
     paddingHorizontal: 0,
     minHeight: 44,
   },
@@ -9604,10 +10189,10 @@ const styles = StyleSheet.create({
   },
   orderDetailsToggle: {
     minHeight: 42,
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: "rgba(151, 171, 199, 0.2)",
-    backgroundColor: "rgba(255, 255, 255, 0.03)",
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    backgroundColor: COLORS.SURFACE_RAISED,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -10133,19 +10718,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.BORDER,
   },
-  callReviewAudioIcon: {
-    color: COLORS.SURFACE,
-    textAlign: "center",
-    fontFamily: FONT_SANS,
+  callReviewAudioIconWrap: {
+    alignItems: "center",
+    justifyContent: "center",
   },
   callReviewAudioIconPlay: {
-    fontSize: 16,
     paddingLeft: 2,
   },
   callReviewAudioIconStop: {
-    fontSize: 14,
   },
-  callReviewAudioIconDisabled: { color: COLORS.TEXT_MUTED },
+  callReviewAudioIconDisabled: { opacity: 0.5 },
   callReviewAudioProgressTrack: {
     flex: 1,
     height: 4,
@@ -10217,6 +10799,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
     fontFamily: FONT_SANS,
     textTransform: "uppercase",
+  },
+  transcriptSpeakerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   callReviewTranscriptSpeakerAgent: { color: COLORS.VOICE_COLOR, marginBottom: 3 },
   callReviewTranscriptSpeakerUser: { color: COLORS.TEXT_MUTED, marginTop: 3, textAlign: "right" },
@@ -10599,7 +11186,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontFamily: FONT_SANS,
   },
-  orderActionRow: { gap: 10 },
+  orderActionRow: { gap: SPACING.XS },
   orderActionRowWeb: { flexDirection: "row", alignItems: "center" },
   orderPrimaryActionWeb: { flexGrow: 0, minWidth: 240 },
   orderSecondaryActionMobile: { alignSelf: "stretch", justifyContent: "center" },
@@ -10607,18 +11194,20 @@ const styles = StyleSheet.create({
   settingsHeader: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 16,
-    paddingTop: Platform.OS === "android" ? SAFE_AREA.top + 12 : 12,
-    paddingBottom: 12,
+    paddingHorizontal: SPACING.LG,
+    paddingTop: Platform.OS === "android" ? SAFE_AREA.top + SPACING.SM : SPACING.SM,
+    paddingBottom: SPACING.SM,
     backgroundColor: COLORS.HEADER_BG,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
   },
   settingsBackButton: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-start",
-    paddingVertical: 8,
+    paddingVertical: SPACING.XS,
     minWidth: 80,
-    gap: 4,
+    gap: SPACING.XXS,
   },
   settingsBackIconWrap: {
     width: 14,
@@ -10642,28 +11231,47 @@ const styles = StyleSheet.create({
     transform: [{ rotate: "45deg" }],
   },
   settingsBackText: {
-    fontSize: 16,
+    fontSize: TYPOGRAPHY.BODY + 1,
     lineHeight: 20,
     color: COLORS.HEADER_TEXT,
-    fontWeight: "600",
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   settingsHeaderTitle: {
     flex: 1,
-    fontSize: 17,
-    fontWeight: "700",
+    fontSize: TYPOGRAPHY.TITLE,
+    fontWeight: "800",
     color: COLORS.HEADER_TEXT,
     textAlign: "center",
     fontFamily: FONT_SANS,
   },
-  settingsHeaderActions: { minWidth: 110, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 10 },
+  settingsHeaderActions: {
+    minWidth: 110,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: SPACING.XS,
+  },
   settingsHeaderGear: { color: COLORS.HEADER_TEXT, fontSize: 18, fontFamily: FONT_SANS },
+  settingsHeaderSyncButton: {
+    borderRadius: RADIUS.PILL,
+    backgroundColor: COLORS.ACCENT,
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS,
+  },
+  settingsHeaderSyncButtonText: {
+    color: COLORS.HEADER_TEXT,
+    fontSize: 13,
+    fontWeight: "700",
+    fontFamily: FONT_SANS,
+  },
   settingsHeaderPrinterButton: {
-    borderRadius: 999,
+    borderRadius: RADIUS.PILL,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.28)",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    borderColor: "rgba(255,255,255,0.22)",
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS,
+    backgroundColor: "rgba(255,255,255,0.05)",
   },
   settingsHeaderPrinterButtonText: {
     color: COLORS.HEADER_TEXT,
@@ -10674,9 +11282,9 @@ const styles = StyleSheet.create({
   settingsHeaderLogoutPlain: { paddingVertical: 6 },
   settingsHeaderLogoutPill: {
     backgroundColor: COLORS.ACCENT,
-    borderRadius: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    borderRadius: RADIUS.PILL,
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS,
   },
   settingsHeaderLogoutText: {
     color: COLORS.HEADER_TEXT,
@@ -10686,40 +11294,43 @@ const styles = StyleSheet.create({
   },
   settingsScreenSafe: { backgroundColor: COLORS.BACKGROUND },
   settingsScreenScroll: { backgroundColor: COLORS.BACKGROUND },
-  lightAdminScreenSafe: { backgroundColor: "#F5F5F5" },
-  lightAdminScreenScroll: { backgroundColor: "#F5F5F5" },
-  lightAdminScreenContent: { backgroundColor: "#F5F5F5", paddingTop: 16 },
+  lightAdminScreenSafe: { backgroundColor: COLORS.BACKGROUND },
+  lightAdminScreenScroll: { backgroundColor: COLORS.BACKGROUND },
+  lightAdminScreenContent: { backgroundColor: COLORS.BACKGROUND, paddingTop: SPACING.LG },
   lightAdminHeader: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 16,
-    paddingTop: Platform.OS === "android" ? SAFE_AREA.top + 8 : 10,
-    paddingBottom: 12,
-    backgroundColor: "#F5F5F5",
+    paddingHorizontal: SPACING.LG,
+    paddingTop: Platform.OS === "android" ? SAFE_AREA.top + SPACING.XS : SPACING.SM,
+    paddingBottom: SPACING.SM,
+    backgroundColor: COLORS.BACKGROUND,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.BORDER,
   },
   lightAdminBackButton: {
     flexDirection: "row",
     alignItems: "center",
     minWidth: 72,
-    paddingVertical: 6,
+    paddingVertical: SPACING.XS - 2,
   },
   lightAdminBackIcon: {
     fontSize: 22,
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   lightAdminBackText: {
-    fontSize: 17,
-    color: "#1A1A1A",
+    fontSize: TYPOGRAPHY.BODY + 2,
+    color: COLORS.TEXT_PRIMARY,
     marginLeft: 2,
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   lightAdminHeaderTitle: {
     flex: 1,
     textAlign: "center",
-    fontSize: 17,
-    fontWeight: "600",
-    color: "#1A1A1A",
+    fontSize: TYPOGRAPHY.TITLE,
+    fontWeight: "800",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   lightAdminDoneButton: {
@@ -10727,7 +11338,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-end",
-    gap: 6,
+    gap: SPACING.XS - 2,
   },
   lightAdminDoneIcon: {
     fontSize: 20,
@@ -10735,7 +11346,7 @@ const styles = StyleSheet.create({
     fontFamily: FONT_SANS,
   },
   lightAdminDoneText: {
-    fontSize: 15,
+    fontSize: TYPOGRAPHY.BODY,
     color: COLORS.ACCENT,
     fontWeight: "600",
     fontFamily: FONT_SANS,
@@ -10745,8 +11356,8 @@ const styles = StyleSheet.create({
     width: "100%",
   },
   settingsWideSectionLandscape: {
-    maxWidth: 1320,
-    alignSelf: "center",
+    width: "100%",
+    alignSelf: "stretch",
   },
   settingsPanelsWrap: {
     width: "100%",
@@ -10754,9 +11365,9 @@ const styles = StyleSheet.create({
   settingsPanelsWrapLandscape: {
     flexDirection: "row",
     alignItems: "flex-start",
-    gap: 16,
-    maxWidth: 1320,
-    alignSelf: "center",
+    gap: SPACING.MD,
+    width: "100%",
+    alignSelf: "stretch",
   },
   settingsPanelColumnLandscape: {
     flex: 1,
@@ -10764,10 +11375,12 @@ const styles = StyleSheet.create({
   },
   scannerCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
-    marginHorizontal: 16,
-    marginBottom: 16,
-    padding: 20,
+    borderRadius: RADIUS.XL,
+    marginHorizontal: SPACING.MD,
+    marginBottom: SPACING.MD,
+    padding: SPACING.LG,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     ...SOFT_CARD_SHADOW,
     elevation: 2,
   },
@@ -10776,32 +11389,32 @@ const styles = StyleSheet.create({
     marginBottom: 0,
   },
   scannerCardTitle: {
-    fontSize: 20,
+    fontSize: TYPOGRAPHY.DISPLAY - 6,
     fontWeight: "800",
-    color: "#1A1A1A",
-    marginBottom: 16,
+    color: COLORS.TEXT_PRIMARY,
+    marginBottom: SPACING.MD,
     fontFamily: FONT_SANS,
   },
   scannerRestaurantSelector: {
-    gap: 8,
-    paddingBottom: 14,
+    gap: SPACING.XS,
+    paddingBottom: SPACING.SM,
   },
   scannerRestaurantChip: {
-    borderRadius: 999,
+    borderRadius: RADIUS.PILL,
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    backgroundColor: "#FFFFFF",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.XS + 1,
   },
   scannerRestaurantChipActive: {
     backgroundColor: COLORS.ACCENT_LIGHT,
     borderColor: COLORS.ACCENT,
   },
   scannerRestaurantChipText: {
-    color: "#1A1A1A",
-    fontSize: 13,
-    fontWeight: "600",
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: TYPOGRAPHY.BODY - 1,
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   scannerRestaurantChipTextActive: {
@@ -10810,29 +11423,31 @@ const styles = StyleSheet.create({
   scannerFieldShell: {
     position: "relative",
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingTop: 20,
-    paddingBottom: 10,
-    marginBottom: 14,
-    backgroundColor: "#FFFFFF",
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    paddingHorizontal: SPACING.SM,
+    paddingTop: SPACING.LG,
+    paddingBottom: SPACING.SM,
+    marginBottom: SPACING.SM,
+    backgroundColor: COLORS.SURFACE_RAISED,
   },
   scannerFieldShellMultiline: {
     minHeight: 92,
   },
   scannerFieldLabel: {
     position: "absolute",
-    top: 8,
-    left: 12,
-    fontSize: 11,
-    color: "#888888",
-    fontWeight: "500",
+    top: SPACING.XS + 1,
+    left: SPACING.SM,
+    fontSize: TYPOGRAPHY.CAPTION,
+    color: COLORS.TEXT_MUTED,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
     fontFamily: FONT_SANS,
   },
   scannerFieldInput: {
-    fontSize: 16,
-    color: "#1A1A1A",
+    fontSize: TYPOGRAPHY.BODY + 1,
+    color: COLORS.TEXT_PRIMARY,
     minHeight: 24,
     paddingTop: 0,
     paddingBottom: 0,
@@ -10845,57 +11460,57 @@ const styles = StyleSheet.create({
   },
   scannerPrimaryButton: {
     backgroundColor: COLORS.ACCENT,
-    borderRadius: 10,
-    height: 50,
+    borderRadius: RADIUS.MD,
+    height: 52,
     alignItems: "center",
     justifyContent: "center",
   },
   scannerPrimaryWideButton: {
     flex: 1,
     backgroundColor: COLORS.ACCENT,
-    borderRadius: 10,
-    height: 50,
+    borderRadius: RADIUS.MD,
+    height: 52,
     alignItems: "center",
     justifyContent: "center",
   },
   scannerPrimaryButtonText: {
-    color: "#FFFFFF",
-    fontSize: 16,
+    color: COLORS.HEADER_TEXT,
+    fontSize: TYPOGRAPHY.BODY + 1,
     fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   scannerDescription: {
-    fontSize: 14,
-    color: "#666666",
-    lineHeight: 20,
-    marginBottom: 16,
+    fontSize: TYPOGRAPHY.BODY,
+    color: COLORS.TEXT_SECONDARY,
+    lineHeight: 22,
+    marginBottom: SPACING.MD,
     fontFamily: FONT_SANS,
   },
   scannerModeButton: {
-    borderWidth: 1.5,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 10,
-    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.SM,
+    marginBottom: SPACING.XS,
+    backgroundColor: COLORS.SURFACE_RAISED,
   },
   scannerModeButtonActive: {
     backgroundColor: COLORS.ACCENT,
     borderColor: COLORS.ACCENT,
   },
   scannerModeButtonTitle: {
-    color: "#1A1A1A",
-    fontSize: 16,
-    fontWeight: "700",
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: TYPOGRAPHY.BODY + 1,
+    fontWeight: "800",
     fontFamily: FONT_SANS,
   },
   scannerModeButtonTitleActive: {
-    color: "#FFFFFF",
+    color: COLORS.HEADER_TEXT,
   },
   scannerModeButtonSubtitle: {
-    color: "#666666",
-    fontSize: 12,
-    marginTop: 2,
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: TYPOGRAPHY.LABEL,
+    marginTop: SPACING.XXS,
     fontFamily: FONT_SANS,
   },
   scannerModeButtonSubtitleActive: {
@@ -10903,13 +11518,13 @@ const styles = StyleSheet.create({
   },
   scannerSecondaryModeRow: {
     flexDirection: "row",
-    gap: 10,
-    marginBottom: 16,
+    gap: SPACING.XS,
+    marginBottom: SPACING.MD,
   },
   scannerCaptureRow: {
     flexDirection: "row",
-    gap: 12,
-    marginBottom: 16,
+    gap: SPACING.SM,
+    marginBottom: SPACING.MD,
   },
   scannerCaptureButton: {
     flex: 1,
@@ -10917,93 +11532,93 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
-    borderWidth: 1.5,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
-    backgroundColor: "#FFFFFF",
+    gap: SPACING.XS,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    backgroundColor: COLORS.SURFACE_RAISED,
   },
   scannerCaptureButtonIcon: {
     fontSize: 16,
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   scannerCaptureButtonText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: "#1A1A1A",
+    fontSize: TYPOGRAPHY.BODY,
+    fontWeight: "700",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   scannerPreviewImage: {
     width: "100%",
     height: 190,
-    borderRadius: 12,
-    marginBottom: 14,
+    borderRadius: RADIUS.SM,
+    marginBottom: SPACING.SM,
   },
   scannerNotesInput: {
     minHeight: 110,
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    color: "#1A1A1A",
-    backgroundColor: "#FFFFFF",
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    paddingHorizontal: SPACING.SM,
+    paddingVertical: SPACING.SM,
+    color: COLORS.TEXT_PRIMARY,
+    backgroundColor: COLORS.SURFACE_RAISED,
     textAlignVertical: "top",
-    marginBottom: 14,
+    marginBottom: SPACING.SM,
     fontFamily: FONT_SANS,
     ...WEB_TEXT_INPUT_RESET,
   },
   scannerDraftActionRow: {
     flexDirection: "row",
-    gap: 10,
-    marginTop: 4,
+    gap: SPACING.XS,
+    marginTop: SPACING.XXS,
   },
   scannerDraftItemCard: {
     borderWidth: 1,
     borderColor: COLORS.BORDER,
-    borderRadius: 12,
-    padding: 14,
-    gap: 2,
-    marginTop: 4,
+    borderRadius: RADIUS.SM,
+    padding: SPACING.SM,
+    gap: SPACING.XXS,
+    marginTop: SPACING.XXS,
     backgroundColor: COLORS.SURFACE_RAISED,
   },
   scannerDraftItemLabel: {
     color: COLORS.ACCENT,
-    fontSize: 12,
+    fontSize: TYPOGRAPHY.LABEL,
     fontWeight: "700",
     letterSpacing: 0.4,
-    marginBottom: 10,
+    marginBottom: SPACING.XS,
     fontFamily: FONT_SANS,
   },
   scannerSecondaryActionButton: {
-    borderWidth: 1.5,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
-    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    paddingHorizontal: SPACING.MD,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#FFFFFF",
+    backgroundColor: COLORS.SURFACE_RAISED,
     minHeight: 50,
   },
   scannerSecondaryActionText: {
-    color: "#1A1A1A",
-    fontWeight: "600",
+    color: COLORS.TEXT_PRIMARY,
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   voiceConsoleCard: {
     backgroundColor: "transparent",
     borderRadius: 0,
     marginHorizontal: 0,
-    marginTop: 4,
-    marginBottom: 12,
+    marginTop: SPACING.XXS,
+    marginBottom: SPACING.SM,
     padding: 0,
   },
   voiceConsoleHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
+    gap: SPACING.SM,
   },
   voiceConsoleTextWrap: {
     flex: 1,
@@ -11012,13 +11627,13 @@ const styles = StyleSheet.create({
   voiceConsoleTitle: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   voiceConsoleEmail: {
-    fontSize: 14,
-    color: "#666666",
-    marginTop: 2,
+    fontSize: TYPOGRAPHY.BODY,
+    color: COLORS.TEXT_SECONDARY,
+    marginTop: SPACING.XXS,
     fontFamily: FONT_SANS,
   },
   voiceConsoleLogoutButton: {
@@ -11032,16 +11647,18 @@ const styles = StyleSheet.create({
   },
   voiceModeSwitch: {
     flexDirection: "row",
-    backgroundColor: "#E8ECF0",
-    borderRadius: 10,
-    padding: 3,
-    marginTop: 12,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.XXS,
+    marginTop: SPACING.SM,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   voiceModeSwitchButton: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: SPACING.XS + 3,
     alignItems: "center",
-    borderRadius: 8,
+    borderRadius: RADIUS.MD,
   },
   voiceModeSwitchButtonActive: {
     backgroundColor: COLORS.ACCENT,
@@ -11053,21 +11670,22 @@ const styles = StyleSheet.create({
     fontFamily: FONT_SANS,
   },
   voiceModeSwitchTextActive: {
-    color: "#FFFFFF",
+    color: COLORS.HEADER_TEXT,
     fontWeight: "700",
   },
   voiceConfigCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
-    marginHorizontal: 16,
-    padding: 20,
+    borderRadius: RADIUS.XL,
+    marginHorizontal: SPACING.MD,
+    padding: SPACING.LG,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     ...SOFT_CARD_SHADOW,
     elevation: 2,
   },
   voiceConfigCardLandscape: {
     width: "100%",
-    maxWidth: 1320,
-    alignSelf: "center",
+    alignSelf: "stretch",
     marginHorizontal: 0,
   },
   voiceConfigContent: {
@@ -11077,7 +11695,7 @@ const styles = StyleSheet.create({
   voiceConfigContentLandscape: {
     flexDirection: "row",
     alignItems: "flex-start",
-    gap: 20,
+    gap: SPACING.LG,
   },
   voiceConfigMainColumn: {
     width: "100%",
@@ -11094,119 +11712,123 @@ const styles = StyleSheet.create({
     minWidth: 280,
   },
   voiceConfigTitle: {
-    fontSize: 20,
+    fontSize: TYPOGRAPHY.DISPLAY - 6,
     fontWeight: "800",
-    color: "#1A1A1A",
-    marginBottom: 16,
+    color: COLORS.TEXT_PRIMARY,
+    marginBottom: SPACING.MD,
     fontFamily: FONT_SANS,
   },
   voiceConfigLabel: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#1A1A1A",
-    marginBottom: 6,
+    fontSize: TYPOGRAPHY.BODY,
+    fontWeight: "700",
+    color: COLORS.TEXT_PRIMARY,
+    marginBottom: SPACING.XS - 2,
     fontFamily: FONT_SANS,
   },
   voiceConfigInput: {
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
-    padding: 14,
-    fontSize: 15,
-    color: "#1A1A1A",
-    backgroundColor: "#FFFFFF",
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    padding: SPACING.SM,
+    fontSize: TYPOGRAPHY.BODY,
+    color: COLORS.TEXT_PRIMARY,
+    backgroundColor: COLORS.SURFACE_RAISED,
     fontFamily: FONT_SANS,
     ...WEB_TEXT_INPUT_RESET,
   },
   voiceSavedKeyBox: {
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
-    padding: 14,
-    backgroundColor: "#FFFFFF",
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    padding: SPACING.SM,
+    backgroundColor: COLORS.SURFACE_RAISED,
   },
   voiceSavedKeyText: {
-    fontSize: 15,
-    color: "#1A1A1A",
+    fontSize: TYPOGRAPHY.BODY,
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_MONO,
   },
   voiceConfigActionStack: {
-    gap: 10,
-    marginTop: 14,
+    gap: SPACING.XS,
+    marginTop: SPACING.SM,
   },
   voiceConfigPrimaryButton: {
     backgroundColor: COLORS.ACCENT,
-    borderRadius: 10,
-    height: 50,
+    borderRadius: RADIUS.MD,
+    height: 52,
     alignItems: "center",
     justifyContent: "center",
   },
   voiceConfigPrimaryButtonText: {
-    color: "#FFFFFF",
+    color: COLORS.HEADER_TEXT,
     fontSize: 16,
-    fontWeight: "700",
+    fontWeight: "800",
     fontFamily: FONT_SANS,
   },
   voiceConfigSecondaryButton: {
     borderWidth: 1,
-    borderColor: "#CCCCCC",
-    borderRadius: 10,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
     minHeight: 46,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 14,
-    backgroundColor: "#FFFFFF",
+    paddingHorizontal: SPACING.SM,
+    backgroundColor: COLORS.SURFACE_RAISED,
   },
   voiceConfigSecondaryButtonText: {
-    color: "#1A1A1A",
+    color: COLORS.TEXT_PRIMARY,
     fontSize: 14,
-    fontWeight: "600",
+    fontWeight: "700",
     fontFamily: FONT_SANS,
   },
   voiceLinkedInfoBox: {
-    backgroundColor: "#F5F5F5",
-    borderRadius: 10,
-    padding: 14,
-    marginTop: 14,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.SM,
+    marginTop: SPACING.SM,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   voiceLinkedInfoBoxLandscape: {
     marginTop: 0,
   },
   voiceLinkedInfoLabel: {
     fontSize: 14,
-    fontWeight: "600",
-    color: "#1A1A1A",
+    fontWeight: "700",
+    color: COLORS.TEXT_PRIMARY,
     fontFamily: FONT_SANS,
   },
   voiceLinkedInfoValue: {
     fontSize: 13,
-    color: "#666666",
+    color: COLORS.TEXT_SECONDARY,
     marginTop: 4,
     fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
   },
-  adminIntroSection: { gap: 16 },
+  adminIntroSection: { gap: SPACING.MD },
   adminSignedInRow: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 4,
+    paddingHorizontal: SPACING.MD,
+    paddingVertical: SPACING.SM,
+    gap: SPACING.XXS,
   },
   adminSignedInLabel: {
     color: COLORS.TEXT_SECONDARY,
-    fontSize: 13,
+    fontSize: TYPOGRAPHY.BODY - 1,
     fontFamily: FONT_SANS,
   },
   adminSignedInValue: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 15,
+    fontSize: TYPOGRAPHY.BODY,
     fontWeight: "600",
     fontFamily: FONT_SANS,
   },
-  headerTextWrap: { flex: 1, gap: 2 },
+  headerTextWrap: { flex: 1, gap: SPACING.XXS },
   settingsHeroCard: {
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 16,
+    borderRadius: RADIUS.XL,
+    paddingHorizontal: SPACING.LG,
+    paddingVertical: SPACING.MD,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     ...METRIC_CARD_SHADOW,
     elevation: 3,
   },
@@ -11216,7 +11838,7 @@ const styles = StyleSheet.create({
   },
   settingsHeroTitle: {
     color: COLORS.TEXT_PRIMARY,
-    fontSize: 22,
+    fontSize: TYPOGRAPHY.DISPLAY - 2,
     fontWeight: "800",
   },
   settingsHeroSubtitle: {
@@ -11225,61 +11847,65 @@ const styles = StyleSheet.create({
   settingsLogoutButton: {
     backgroundColor: COLORS.SURFACE_RAISED,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     minWidth: 88,
   },
   settingsLogoutText: { color: COLORS.ACCENT, fontWeight: "700" },
-  row: { flexDirection: "row", gap: 8 },
-  parseModeRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  row: { flexDirection: "row", gap: SPACING.XS },
+  parseModeRow: { flexDirection: "row", gap: SPACING.XS, flexWrap: "wrap" },
   parseModeTab: { flexGrow: 1, minWidth: 108 },
-  rowBetween: { flexDirection: "row", gap: 8, justifyContent: "space-between", alignItems: "center" },
-  metricsRow: { flexDirection: "row", gap: 8 },
+  rowBetween: { flexDirection: "row", gap: SPACING.XS, justifyContent: "space-between", alignItems: "center" },
+  metricsRow: { flexDirection: "row", gap: SPACING.XS },
   metricCard: {
     flex: 1,
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
-    paddingVertical: 14,
+    borderRadius: RADIUS.LG,
+    paddingVertical: SPACING.MD,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
     alignItems: "center",
     ...METRIC_CARD_SHADOW,
     elevation: 2,
   },
   metricValue: { color: COLORS.ACCENT, fontSize: 24, fontWeight: "800", fontFamily: FONT_SANS },
   metricLabel: { color: THEME.mutedText, fontSize: 12, fontWeight: "600", fontFamily: FONT_SANS },
-  settingsMetricsRow: { gap: 10 },
-  settingsMetricCard: { backgroundColor: COLORS.SURFACE, paddingVertical: 16 },
+  settingsMetricsRow: { gap: SPACING.XS },
+  settingsMetricCard: { backgroundColor: COLORS.SURFACE, paddingVertical: SPACING.MD },
   mainTabs: {
     flexDirection: "row",
     gap: 0,
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
-    padding: 4,
-    borderWidth: 0,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.XXS,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   mainTabButton: {
     flex: 1,
-    minHeight: 46,
-    borderRadius: 10,
+    minHeight: 48,
+    borderRadius: RADIUS.MD,
     alignItems: "center",
     justifyContent: "center",
   },
-  mainTabButtonActive: { backgroundColor: COLORS.ACCENT_LIGHT },
+  mainTabButtonActive: { backgroundColor: COLORS.ACCENT_LIGHT, borderWidth: 1, borderColor: COLORS.ACCENT },
   mainTabText: { color: COLORS.TEXT_PRIMARY, fontWeight: "400", fontSize: 14, fontFamily: FONT_SANS },
   mainTabTextActive: { color: COLORS.ACCENT, fontWeight: "700", fontFamily: FONT_SANS },
   settingsTabs: {
     gap: 0,
     backgroundColor: COLORS.SURFACE,
-    borderRadius: 14,
-    padding: 4,
-    borderWidth: 0,
-    marginBottom: 16,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.XXS,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    marginBottom: SPACING.MD,
   },
   settingsTabButton: {
-    minHeight: 46,
-    borderRadius: 10,
+    minHeight: 48,
+    borderRadius: RADIUS.MD,
     paddingVertical: 0,
     justifyContent: "center",
   },
-  settingsTabButtonActive: { backgroundColor: COLORS.ACCENT_LIGHT },
+  settingsTabButtonActive: { backgroundColor: COLORS.ACCENT_LIGHT, borderWidth: 1, borderColor: COLORS.ACCENT },
   settingsTabText: {
     color: COLORS.TEXT_MUTED,
     fontSize: 14,
@@ -11289,17 +11915,17 @@ const styles = StyleSheet.create({
   authSegmentedControl: {
     flexDirection: "row",
     backgroundColor: COLORS.SURFACE_RAISED,
-    borderRadius: 12,
-    padding: 4,
+    borderRadius: RADIUS.LG,
+    padding: SPACING.XXS,
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    marginBottom: 24,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    marginBottom: SPACING.XL,
   },
   authSegmentTab: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: SPACING.XS + 3,
     alignItems: "center",
-    borderRadius: 10,
+    borderRadius: RADIUS.MD,
     borderWidth: 1,
     borderColor: "transparent",
   },
@@ -11321,12 +11947,12 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    marginBottom: 14,
-    backgroundColor: COLORS.SURFACE,
-    height: 52,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
+    borderRadius: RADIUS.MD,
+    paddingHorizontal: SPACING.SM,
+    marginBottom: SPACING.SM,
+    backgroundColor: COLORS.SURFACE_RAISED,
+    height: 56,
     overflow: "hidden",
   },
   authFieldFocused: {
@@ -11495,15 +12121,17 @@ const styles = StyleSheet.create({
   modeSwitch: {
     flexDirection: "row",
     backgroundColor: COLORS.SURFACE_RAISED,
-    borderRadius: 10,
-    padding: 3,
+    borderRadius: 18,
+    padding: 5,
     marginHorizontal: 16,
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: COLORS.SURFACE_BORDER_SOFT,
   },
   modeSwitchButton: {
     flex: 1,
-    paddingVertical: 10,
-    borderRadius: 8,
+    paddingVertical: 11,
+    borderRadius: 14,
     alignItems: "center",
   },
   modeSwitchButtonActive: {
@@ -11511,35 +12139,35 @@ const styles = StyleSheet.create({
   },
   modeSwitchText: { color: COLORS.TEXT_SECONDARY, fontWeight: "500", fontSize: 15, fontFamily: FONT_SANS },
   modeSwitchTextActive: { color: COLORS.SURFACE, fontWeight: "700", fontFamily: FONT_SANS },
-  primary: { backgroundColor: THEME.primary, borderRadius: 12, alignItems: "center", paddingVertical: 11 },
+  primary: { backgroundColor: THEME.primary, borderRadius: 16, alignItems: "center", paddingVertical: 13 },
   primaryDisabled: { opacity: 0.6 },
   primaryWide: {
     flex: 1,
     backgroundColor: THEME.primary,
-    borderRadius: 12,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 11,
+    paddingVertical: 13,
   },
-  primaryText: { color: COLORS.SURFACE, fontWeight: "700", fontFamily: FONT_SANS },
+  primaryText: { color: COLORS.SURFACE, fontWeight: "800", letterSpacing: 0.2, fontFamily: FONT_SANS },
   secondary: {
     backgroundColor: THEME.primarySoft,
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: THEME.accentSoft,
     alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
   secondaryCompact: {
     backgroundColor: THEME.primarySoft,
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: THEME.accentSoft,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     minWidth: 88,
   },
   secondaryText: { color: THEME.accent, fontWeight: "700", fontFamily: FONT_SANS },
@@ -11548,8 +12176,8 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     borderColor: THEME.chipBorder,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
   },
   chipActive: { backgroundColor: THEME.primary, borderColor: THEME.primary },
   chipText: { color: THEME.chipText, fontWeight: "600", fontFamily: FONT_SANS },

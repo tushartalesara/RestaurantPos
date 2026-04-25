@@ -1,0 +1,43 @@
+name: Supabase Maintenance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  keepalive-and-drain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping voice dispatcher and drain webhook queue
+        env:
+          SUPABASE_FUNCTIONS_BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
+          ELEVENLABS_TOOL_SECRET: ${{ secrets.ELEVENLABS_TOOL_SECRET }}
+          WEBHOOK_WORKER_SECRET: ${{ secrets.WEBHOOK_WORKER_SECRET }}
+        run: |
+          if [ -z "$SUPABASE_FUNCTIONS_BASE_URL" ]; then
+            echo "SUPABASE_FUNCTIONS_BASE_URL is not configured. Skipping maintenance run."
+            exit 0
+          fi
+
+          dispatcher_headers=(-H "Content-Type: application/json")
+          if [ -n "$ELEVENLABS_TOOL_SECRET" ]; then
+            dispatcher_headers+=(-H "x-tool-secret: $ELEVENLABS_TOOL_SECRET")
+          fi
+
+          curl --fail --silent --show-error \
+            -X POST \
+            "${dispatcher_headers[@]}" \
+            "$SUPABASE_FUNCTIONS_BASE_URL/voice-tool-dispatcher" \
+            -d '{"action":"healthcheck"}'
+
+          worker_headers=(-H "Content-Type: application/json")
+          if [ -n "$WEBHOOK_WORKER_SECRET" ]; then
+            worker_headers+=(-H "Authorization: Bearer $WEBHOOK_WORKER_SECRET")
+          fi
+
+          curl --fail --silent --show-error \
+            -X POST \
+            "${worker_headers[@]}" \
+            "$SUPABASE_FUNCTIONS_BASE_URL/process-webhook-ingest-queue" \
+            -d '{"limit":20}'

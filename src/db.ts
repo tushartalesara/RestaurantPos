@@ -167,6 +167,49 @@ function extractRecordingUrlFromWebhookPayload(payload: unknown): string | null 
   )
 }
 
+function extractRecordingStorageBucketFromWebhookPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null
+  }
+
+  const root = payload as Record<string, unknown>
+  const normalizedMetadata =
+    root.normalized_metadata && typeof root.normalized_metadata === "object"
+      ? (root.normalized_metadata as Record<string, unknown>)
+      : null
+
+  return normalizeOptionalString(normalizedMetadata?.recording_storage_bucket)
+}
+
+function extractRecordingStoragePathFromWebhookPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null
+  }
+
+  const root = payload as Record<string, unknown>
+  const normalizedMetadata =
+    root.normalized_metadata && typeof root.normalized_metadata === "object"
+      ? (root.normalized_metadata as Record<string, unknown>)
+      : null
+
+  return normalizeOptionalString(normalizedMetadata?.recording_storage_path)
+}
+
+function extractRecordingSizeBytesFromWebhookPayload(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") {
+    return null
+  }
+
+  const root = payload as Record<string, unknown>
+  const normalizedMetadata =
+    root.normalized_metadata && typeof root.normalized_metadata === "object"
+      ? (root.normalized_metadata as Record<string, unknown>)
+      : null
+
+  const parsed = normalizePositiveNumber(normalizedMetadata?.recording_size_bytes)
+  return parsed > 0 ? parsed : null
+}
+
 export async function initDatabase() {
   assertSupabaseConfigured()
   // Warm up auth session fetch so app fails fast with clear config/auth errors.
@@ -179,11 +222,25 @@ export async function initDatabase() {
 export async function listRestaurants(ownerUserId: string): Promise<RestaurantRecord[]> {
   assertSupabaseConfigured()
 
-  const { data, error } = await supabase
+  const restaurantsWithPaymentPin = await supabase
     .from("restaurants")
-    .select("id, owner_user_id, name, phone, address, country_code, currency_code, created_at, updated_at")
+    .select("id, owner_user_id, name, phone, address, country_code, currency_code, payment_pin_hash, created_at, updated_at")
     .eq("owner_user_id", ownerUserId)
     .order("created_at", { ascending: false })
+
+  let data = restaurantsWithPaymentPin.data as Record<string, unknown>[] | null
+  let error = restaurantsWithPaymentPin.error
+
+  if (error && isMissingColumnError(error, "restaurants", "payment_pin_hash")) {
+    const fallbackResult = await supabase
+      .from("restaurants")
+      .select("id, owner_user_id, name, phone, address, country_code, currency_code, created_at, updated_at")
+      .eq("owner_user_id", ownerUserId)
+      .order("created_at", { ascending: false })
+
+    data = fallbackResult.data as Record<string, unknown>[] | null
+    error = fallbackResult.error
+  }
 
   if (error) {
     throw new Error(error.message)
@@ -197,6 +254,7 @@ export async function listRestaurants(ownerUserId: string): Promise<RestaurantRe
     address: normalizeOptionalString(restaurant.address),
     countryCode: normalizeRequiredString(restaurant.country_code, "GB"),
     currencyCode: normalizeRequiredString(restaurant.currency_code, "GBP"),
+    hasPaymentPin: Boolean(normalizeOptionalString((restaurant as Record<string, unknown>).payment_pin_hash)),
     created_at: String(restaurant.created_at || ""),
     updated_at: String(restaurant.updated_at || ""),
   }))
@@ -249,6 +307,40 @@ export async function saveRestaurant(input: {
   }
 
   return requireData(data, "Failed to create restaurant").id as string
+}
+
+export async function saveRestaurantPaymentPin(input: { restaurantId: string; pin: string }) {
+  assertSupabaseConfigured()
+
+  const { data, error } = await supabase.functions.invoke<{
+    ok?: boolean
+    restaurant_id?: string
+    has_payment_pin?: boolean
+    updated_at?: string
+    error?: string
+    remediation?: string
+  }>("save-restaurant-payment-pin", {
+    body: {
+      restaurant_id: input.restaurantId,
+      pin: input.pin,
+    },
+  })
+
+  if (error) {
+    throw new Error(error.message || "Failed to save the restaurant payment PIN.")
+  }
+
+  if (!data?.ok) {
+    throw new Error(
+      [data?.error || "Failed to save the restaurant payment PIN.", data?.remediation || ""].filter(Boolean).join(" "),
+    )
+  }
+
+  return {
+    restaurantId: normalizeOptionalString(data.restaurant_id) || input.restaurantId,
+    hasPaymentPin: Boolean(data.has_payment_pin),
+    updatedAt: normalizeOptionalString(data.updated_at),
+  }
 }
 
 export async function insertMenuScan(input: {
@@ -719,26 +811,98 @@ export async function listRestaurantOrders(restaurantId: string): Promise<Restau
   }
 
   const callReviewsByOrderId = new Map<string, OrderCallReviewRecord>()
-  const { data: callReviewRows, error: callReviewError } = await supabase
+  const callReviewResultWithStorage = await supabase
     .from("post_call_webhooks")
     .select(
-      "id, created_order_id, conversation_id, transcript_text, analysis_status, webhook_payload, created_at, updated_at",
+      "id, created_order_id, conversation_id, transcript_text, analysis_status, recording_storage_bucket, recording_storage_path, recording_size_bytes, webhook_payload, created_at, updated_at",
     )
     .in("created_order_id", orderIds)
     .order("updated_at", { ascending: false })
 
+  let callReviewRows = callReviewResultWithStorage.data as Record<string, unknown>[] | null
+  let callReviewError = callReviewResultWithStorage.error
+
+  if (
+    callReviewError &&
+    (
+      isMissingColumnError(callReviewError, "post_call_webhooks", "recording_storage_bucket") ||
+      isMissingColumnError(callReviewError, "post_call_webhooks", "recording_storage_path") ||
+      isMissingColumnError(callReviewError, "post_call_webhooks", "recording_size_bytes")
+    )
+  ) {
+    const fallbackCallReviewResult = await supabase
+      .from("post_call_webhooks")
+      .select("id, created_order_id, conversation_id, transcript_text, analysis_status, webhook_payload, created_at, updated_at")
+      .in("created_order_id", orderIds)
+      .order("updated_at", { ascending: false })
+
+    callReviewRows = fallbackCallReviewResult.data as Record<string, unknown>[] | null
+    callReviewError = fallbackCallReviewResult.error
+  }
+
   if (!callReviewError) {
+    const signedRecordingUrls = new Map<string, string>()
+    const storagePathsByBucket = new Map<string, string[]>()
+
+    for (const row of callReviewRows || []) {
+      const recordingStoragePath =
+        normalizeOptionalString(row.recording_storage_path) || extractRecordingStoragePathFromWebhookPayload(row.webhook_payload)
+      const recordingStorageBucket =
+        normalizeOptionalString(row.recording_storage_bucket) ||
+        extractRecordingStorageBucketFromWebhookPayload(row.webhook_payload) ||
+        (recordingStoragePath ? "call-recordings" : null)
+
+      if (!recordingStorageBucket || !recordingStoragePath) {
+        continue
+      }
+
+      const existingPaths = storagePathsByBucket.get(recordingStorageBucket) || []
+      if (!existingPaths.includes(recordingStoragePath)) {
+        storagePathsByBucket.set(recordingStorageBucket, [...existingPaths, recordingStoragePath])
+      }
+    }
+
+    for (const [bucket, paths] of storagePathsByBucket.entries()) {
+      const signedUrlResult = await supabase.storage.from(bucket).createSignedUrls(paths, 60 * 30)
+      if (signedUrlResult.error) {
+        continue
+      }
+
+      for (const [index, path] of paths.entries()) {
+        const signedUrl = normalizeOptionalString(signedUrlResult.data?.[index]?.signedUrl)
+        if (signedUrl) {
+          signedRecordingUrls.set(`${bucket}:${path}`, signedUrl)
+        }
+      }
+    }
+
     for (const row of callReviewRows || []) {
       const orderId = normalizeOptionalString(row.created_order_id)
       if (!orderId || callReviewsByOrderId.has(orderId)) {
         continue
       }
 
+      const recordingStoragePath =
+        normalizeOptionalString(row.recording_storage_path) || extractRecordingStoragePathFromWebhookPayload(row.webhook_payload)
+      const recordingStorageBucket =
+        normalizeOptionalString(row.recording_storage_bucket) ||
+        extractRecordingStorageBucketFromWebhookPayload(row.webhook_payload) ||
+        (recordingStoragePath ? "call-recordings" : null)
+      const signedRecordingUrl =
+        recordingStorageBucket && recordingStoragePath
+          ? signedRecordingUrls.get(`${recordingStorageBucket}:${recordingStoragePath}`) || null
+          : null
+      const recordingSizeBytes =
+        normalizePositiveNumber(row.recording_size_bytes) || extractRecordingSizeBytesFromWebhookPayload(row.webhook_payload) || null
+
       callReviewsByOrderId.set(orderId, {
         id: String(row.id),
         conversationId: normalizeOptionalString(row.conversation_id),
         transcriptText: normalizeOptionalString(row.transcript_text),
-        recordingUrl: extractRecordingUrlFromWebhookPayload(row.webhook_payload),
+        recordingUrl: signedRecordingUrl || extractRecordingUrlFromWebhookPayload(row.webhook_payload),
+        recordingStorageBucket,
+        recordingStoragePath,
+        recordingSizeBytes,
         analysisStatus: normalizeOptionalString(row.analysis_status),
         created_at: normalizeOptionalString(row.created_at) || undefined,
         updated_at: normalizeOptionalString(row.updated_at) || undefined,
